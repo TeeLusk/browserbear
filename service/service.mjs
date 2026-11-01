@@ -733,13 +733,17 @@ const commands = {
     // The agent still needs the tab's id to get out of a page that failed.
     const failure = loadFailure(tab);
     if (failure) throw new Error(`opened tab ${tab.tabId} in ${describe(p)}, but: ${failure}. ${wayOut(tab.tabId)}`);
-    await wake(tab.tabId);
-    await drawn(tab.tabId);
-    const snap = await snapshot(tab.tabId).catch((e) => {
-      if (e.refused) e.message = `opened tab ${tab.tabId} in ${describe(p)}, but: ${e.message}`;
+    // Whatever goes wrong from here, the tab is open: an agent that only sees
+    // the error thinks the open failed, and opens another (BTC Markets, 1 Nov).
+    try {
+      await wake(tab.tabId);
+      await drawn(tab.tabId);
+      const snap = await snapshot(tab.tabId);
+      return `opened tab ${tab.tabId} in ${describe(p)}, in BrowserBear's own window\n${snap}${await handoffHint(tab.tabId)}`;
+    } catch (e) {
+      e.message = `opened tab ${tab.tabId} in ${describe(p)}, but couldn't look at it yet: ${e.message}`;
       throw e;
-    });
-    return `opened tab ${tab.tabId} in ${describe(p)}, in BrowserBear's own window\n${snap}${await handoffHint(tab.tabId)}`;
+    }
   },
 
   // Find one of Mike's own tabs by a bit of its URL or title.

@@ -146,9 +146,12 @@ export async function extensionInChrome(t, otherExtensions = []) {
   }
   if (!worker) throw new Error("BrowserBear's service worker never started");
   const { result: { sessionId } } = await send('Target.attachToTarget', { targetId: worker.targetId, flatten: true });
-  return async (expression) => {
+  const inWorker = async (expression) => {
     const { result } = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, sessionId);
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
     return result.result.value;
   };
+  // Attaching can beat the worker's own start, when it has no chrome.* yet.
+  for (let i = 0; i < 50 && !(await inWorker("typeof ops !== 'undefined' && !!globalThis.chrome?.tabs")); i++) await new Promise((r) => setTimeout(r, 100));
+  return inWorker;
 }

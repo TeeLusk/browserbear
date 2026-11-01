@@ -247,16 +247,21 @@ const ops = {
       // (1Password's menu on focusing an address field, passport.service.gov.uk,
       // 30 Oct), and refuses to attach again while it's there.
       const blocking = await blankExtensionFrames(tabId);
-      if (!blocking.length) throw e;
+      // A detach with no such frame is the tab closing or the like.
+      if (!refused && !blocking.length) throw e;
       const who = `another extension's frame (${blocking.join(', ')}; a password manager's menu, usually)`;
       // A command Chrome cut off may already have run (typed text, a
       // click), so it isn't sent again; one that was refused never ran.
       if (!refused) throw new Error(`${who} appeared mid-command and Chrome detached BrowserBear. It's cleared now; snap to see whether the command ran`);
       try {
+        // Even with nothing found: the frame may have gone by itself already.
         await attach(tabId);
         return await chrome.debugger.sendCommand({ tabId }, method, params || {});
       } catch (again) {
-        throw new Error(`${who} is in this tab and Chrome won't let BrowserBear in while it's there; clearing it didn't stick (${again?.message})`);
+        // Chrome's own wording reads as if the command were wrong or the tab
+        // broken, when the page is fine and BrowserBear just can't reach it.
+        if (!blocking.length) throw new Error(`Chrome won't let BrowserBear into tab ${tabId} because another extension (a password manager, usually) has a frame in it, and BrowserBear couldn't find the frame to clear it. The page itself is fine; try again, or browserbear handoff ${tabId} if a person can do this step`);
+        throw new Error(`${who} is in tab ${tabId} and Chrome won't let BrowserBear in while it's there; clearing it didn't stick (${again?.message}). The page itself is fine`);
       }
     } finally {
       if (COVERED.test(method)) showMarkSoon(tabId);
@@ -582,9 +587,13 @@ async function blankExtensionFrames(tabId) {
       args: [chrome.runtime.id],
       func: (self) => {
         const ids = [];
+        // chrome.dom throws on anything that isn't an HTML element, and one
+        // svg on the page would then lose the whole scan, leaving the tab
+        // locked (BTC Markets' sign-in page, 1 Nov).
+        const shadowOf = (el) => (el instanceof HTMLElement && chrome.dom?.openOrClosedShadowRoot?.(el)) || el.shadowRoot;
         const visit = (root) => {
           for (const el of root.querySelectorAll('*')) {
-            const shadow = chrome.dom?.openOrClosedShadowRoot?.(el) || el.shadowRoot;
+            const shadow = shadowOf(el);
             if (shadow) visit(shadow);
             if (!['IFRAME', 'FRAME', 'EMBED', 'OBJECT'].includes(el.tagName)) continue;
             const m = /^chrome-extension:\/\/([a-p]{32})/.exec(el.src || el.data || '');

@@ -58,6 +58,15 @@ test('a warning page is named, and goto gets the tab out', async (t) => {
   assert.equal(await browserbear('read', '7'), 'Good text');
 });
 
+test("open still names the tab it opened when it can't then look at it", async (t) => {
+  const { browserbear } = await startBear(t, ({ op }) => {
+    if (op === 'open') return { tabId: 9, url: 'https://locked.example/', title: 'Sign in', active: true };
+    if (op === 'cdp') throw new Error("Chrome won't let BrowserBear into tab 9");
+    return true;
+  });
+  await assert.rejects(browserbear('open', 'https://locked.example/', '--profile', 'Work'), /opened tab 9 in Work.*, but couldn't look at it yet: Chrome won't let BrowserBear into tab 9/);
+});
+
 test('an older extension is told to reload rather than left stuck', async (t) => {
   const { browserbear } = await startBear(t, ({ op }) => {
     if (op === 'tabs') return [{ tabId: 7, url: 'https://bad.example/', title: 'Privacy error', active: true }];

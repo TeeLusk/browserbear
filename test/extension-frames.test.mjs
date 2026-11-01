@@ -13,7 +13,9 @@ import { CFT, extensionInChrome, root } from './harness.mjs';
 test("another extension's frame doesn't lock BrowserBear out of the tab", { skip: !CFT && 'no Chrome for Testing' }, async (t) => {
   const server = http.createServer((req, res) => {
     res.setHeader('content-type', 'text/html');
-    res.end('<title>Address</title><input id="line1">');
+    // The svg is part of the test: chrome.dom's shadow root call throws on one,
+    // which once lost the whole scan for the frame (BTC Markets' sign-in, 1 Nov).
+    res.end('<title>Address</title><svg></svg><input id="line1">');
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => server.close());

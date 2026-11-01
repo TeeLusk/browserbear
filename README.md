@@ -41,7 +41,10 @@ browserbear CLI (or Threadbear)
   answers, and `read` waits for a page with a body.
 - Chrome won't let a debugger into a tab holding another extension's frame (a password
   manager's inline menu), so the extension blanks those frames and gets back in. That
-  needs the `scripting` permission.
+  needs the `scripting` permission. It has to scan the page's DOM to find them, shadow
+  roots included: `webNavigation.getAllFrames` doesn't list other extensions' frames, and
+  `chrome.dom.openOrClosedShadowRoot` throws on non-HTML elements like `<svg>`, so call
+  it on HTML elements only.
 
 ## Install (for now)
 
