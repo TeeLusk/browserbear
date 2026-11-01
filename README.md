@@ -39,6 +39,9 @@ browserbear CLI (or Threadbear)
   again.
 - A click, key or submit that starts a navigation waits for the next page before it
   answers, and `read` waits for a page with a body.
+- `type --replace` puts the text in over a selection as one edit, since a controlled
+  field can restore its old value the moment it's emptied. It then reads the field back
+  and fails, before any `--submit`, unless it holds exactly that text.
 - Chrome won't let a debugger into a tab holding another extension's frame (a password
   manager's inline menu), so the extension blanks those frames and gets back in. That
   needs the `scripting` permission. It has to scan the page's DOM to find them, shadow

@@ -622,6 +622,64 @@ async function pressKey(tabId, combo) {
   await cdp(tabId, 'Input.dispatchKeyEvent', { ...ev, type: 'keyUp' });
 }
 
+// The field type --replace means: the ref if it's editable, otherwise whatever
+// has focus (a ref on a wrapper, or no ref), through shadow roots and iframes.
+const FIELD = `
+  const editable = (e) => e && (e.tagName === 'INPUT' || e.tagName === 'TEXTAREA' || e.isContentEditable);
+  let field = editable(this) ? this : document.activeElement;
+  while (!editable(this) && (field?.shadowRoot?.activeElement || field?.contentDocument?.activeElement)) field = field.shadowRoot?.activeElement || field.contentDocument.activeElement;
+  if (!editable(field)) return null;
+  while (field.isContentEditable && field.parentElement?.isContentEditable) field = field.parentElement;`;
+
+async function onField(tabId, node, body) {
+  const target = node ? (await cdp(tabId, 'DOM.resolveNode', { backendNodeId: node })).object : (await cdp(tabId, 'Runtime.evaluate', { expression: 'document.documentElement' })).result;
+  const { result } = await cdp(tabId, 'Runtime.callFunctionOn', { objectId: target.objectId, functionDeclaration: `function () {${FIELD}${body}}`, returnByValue: true });
+  return result?.value ?? null;
+}
+
+// select() works on number inputs, where setSelectionRange throws.
+const SELECT_FIELD = `
+  field.focus();
+  if (field.select) field.select();
+  else field.ownerDocument.getSelection().selectAllChildren(field);
+  return true;`;
+const READ_FIELD = `return { value: field.value ?? field.innerText, rich: field.value === undefined, secret: field.type === 'password' };`;
+
+// Rich editors wrap text in their own paragraphs, so only the words count there.
+const flatten = (s) => s.replace(/\s+/g, ' ').trim();
+const holds = (read, text) => (read.rich ? flatten(read.value) === flatten(text) : read.value === text);
+
+// Types over what the field holds. Clearing first and typing after doesn't work
+// everywhere: a controlled field can put its old value straight back once it's
+// empty, so the new text lands after it ("stocks-clistocks cli" on Webull's API
+// key form, 1 Nov). So the text goes in over a selection, as a single edit. The
+// keys are the fallback, with a pause before typing since those pages can take a
+// moment to redraw. Pages can still change what they're given (an amount
+// re-derived from its state on BTC Markets, 30 Oct), so the field is read back,
+// and a field that doesn't hold exactly the text is a failure. Runs before any
+// --submit, so a wrong value doesn't get sent.
+async function replaceText(tabId, node, text) {
+  const insert = () => (text ? cdp(tabId, 'Input.insertText', { text }) : pressKey(tabId, 'Backspace'));
+  if (await onField(tabId, node, SELECT_FIELD).catch(() => null)) {
+    await insert();
+    await settle();
+    const read = await onField(tabId, node, READ_FIELD);
+    if (read && holds(read, text)) return '';
+  }
+  if (node) await clickNode(tabId, node);
+  await pressKey(tabId, 'Meta+a');
+  await pressKey(tabId, 'Backspace');
+  await settle();
+  if (text) await cdp(tabId, 'Input.insertText', { text });
+  await settle();
+  const read = await onField(tabId, node, READ_FIELD);
+  // A canvas editor (Google Docs) has no field to read back.
+  if (!read) return "(this editor can't be read back, so check below that the text was replaced)";
+  if (holds(read, text)) return '';
+  const now = read.secret ? 'something else (a password field, so it isn\'t shown)' : JSON.stringify(read.value);
+  throw new Error(`--replace didn't work on tab ${tabId}: the field holds ${now}, not ${JSON.stringify(text)}. Nothing was submitted. The page may have changed or reformatted it; snap to see`);
+}
+
 async function evaluate(tabId, expression) {
   const r = await cdp(tabId, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
@@ -793,19 +851,17 @@ const commands = {
       const node = await nodeFor(tab, ref);
       await cdp(tab, 'DOM.focus', { backendNodeId: node }).catch(() => clickNode(tab, node));
     }
-    if (replace) {
-      await pressKey(tab, 'Meta+a');
-      await pressKey(tab, 'Backspace');
-    }
     // insertText fires the same beforeinput/input events as real typing, which
     // rich editors (Discord, Slack, Studio) listen for; setting .value doesn't.
-    await cdp(tab, 'Input.insertText', { text });
+    let note = '';
+    if (replace) note = await replaceText(tab, ref ? await nodeFor(tab, ref) : null, text);
+    else await cdp(tab, 'Input.insertText', { text });
     if (submit) {
       await markPage(tab);
       await pressKey(tab, 'Enter');
       await settleAfterAction(tab);
-    } else await settle();
-    return snapshot(tab);
+    } else if (!replace) await settle(); // replaceText has waited already
+    return (note ? note + '\n' : '') + (await snapshot(tab));
   },
 
   async key({ tab, key }) {
