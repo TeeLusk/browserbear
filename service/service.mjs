@@ -57,23 +57,52 @@ function describe(p) {
 // connected profile's email, so a profile keeps its name when it reconnects.
 const menuNames = new Map(); // email -> "Michael (convex.dev)"
 
+function setMenuName(p, name) {
+  p.menuName = name;
+  p.name ||= name; // Local State's name, where there is one, stays the display name
+  if (p.email) menuNames.set(p.email, name);
+}
+
 // Give connected profiles their names from the Profiles menu, where the menu
-// says which one it is: a name with the email's domain in brackets, and only
-// one such name.
+// says which one it is. The menu has names but no emails, so it takes working out:
+//  - the name it already has from Chrome's list, or
+//  - a name with the email's domain in brackets, and only one such name, or
+//  - a personal account: Chrome only brackets a work account's domain, so a
+//    profile left with no name must be a name without brackets. Only when
+//    there's exactly one of each. Without this "Michael" (Mike's Gmail) stays
+//    unmatched, and looks like a profile that still needs opening.
 function learnNames(menu) {
-  for (const p of profiles.values()) {
-    if (p.name || !p.email) continue;
+  const unmatched = () => [...profiles.values()].filter((p) => p.email && !p.menuName);
+  for (const p of unmatched()) {
     const domain = p.email.split('@')[1].toLowerCase();
-    const names = menu.filter((n) => domainOf(n) === domain);
-    if (names.length === 1) {
-      p.name = names[0];
-      menuNames.set(p.email, names[0]);
-    }
+    const byDomain = menu.filter((n) => domainOf(n) === domain);
+    if (p.name && menu.includes(p.name)) setMenuName(p, p.name);
+    else if (byDomain.length === 1) setMenuName(p, byDomain[0]);
+  }
+  const left = unmatched();
+  const taken = new Set([...profiles.values()].map((p) => p.menuName));
+  const plain = menu.filter((n) => !domainOf(n) && !taken.has(n));
+  if (left.length === 1 && plain.length === 1) setMenuName(left[0], plain[0]);
+}
+
+// Chrome's list says who a connected profile is whenever it can be read, which
+// may not have been when the profile connected.
+function learnFromChrome(known) {
+  for (const p of profiles.values()) {
+    const k = known?.find((x) => x.email && x.email.toLowerCase() === p.email?.toLowerCase());
+    if (k) Object.assign(p, { name: p.name && p.name !== p.menuName ? p.name : k.name, dir: k.dir });
   }
 }
 
-const matches = (p, w) => [p.name, p.email, p.dir].some((v) => v?.toLowerCase() === w);
-const roughly = (p, w) => [p.name, p.email].some((v) => v?.toLowerCase().includes(w));
+const quoted = (names) => names.map((n) => `"${n}"`).join(', ');
+
+// A profile is asked for by its whole name, email or folder, in any case. Never
+// by part of one: "Michael" once found "Michael (convex.dev)" because the
+// profile really called Michael had no name yet, and an agent ended up signed
+// in as the wrong person (James interview, 3 Nov). Being sent back to say it
+// properly costs one try; the wrong account can cost a lot more.
+const isCalled = (p, w) => [p.name, p.menuName, p.email, p.dir].some((v) => v?.toLowerCase() === w);
+const nearly = (names, w) => names.filter((n) => n?.toLowerCase().includes(w));
 
 async function findProfile(want) {
   const all = [...profiles.values()];
@@ -83,9 +112,17 @@ async function findProfile(want) {
   }
   const w = want.toLowerCase();
   const connected = () => [...profiles.values()];
-  const find = () => connected().find((p) => matches(p, w)) || connected().find((p) => roughly(p, w));
+  const find = () => {
+    const hits = connected().filter((p) => isCalled(p, w));
+    // Chrome lets two profiles share a name.
+    if (hits.length > 1) throw new Error(`"${want}" could be any of ${hits.map(describe).join(', ')}; use the email`);
+    return hits[0];
+  };
   let hit = find();
   if (hit) return hit;
+  const known = chromeProfiles();
+  learnFromChrome(known);
+  if ((hit = find())) return hit;
   // Not connected: most likely Chrome has no window open for it, so its
   // extension isn't running. Open it, rather than send the agent off to do it
   // (Title lab, 2 Nov: a Codex agent gave up here).
@@ -95,25 +132,24 @@ async function findProfile(want) {
     if ((hit = find())) return hit;
   }
   const names = Array.isArray(menu) ? menu : [];
-  const named = names.find((n) => n.toLowerCase() === w) || (() => {
-    const near = names.filter((n) => n.toLowerCase().includes(w));
-    if (near.length > 1) throw new Error(`"${want}" could be any of ${near.map((n) => `"${n}"`).join(', ')}; say which`);
-    return near[0];
-  })();
+  const named = names.find((n) => n.toLowerCase() === w);
+  // Where Chrome's list can be read, it has the email even for a name.
+  const listed = known?.filter((p) => isCalled(p, w)) || [];
+  if (listed.length > 1) throw new Error(`"${want}" could be any of ${listed.map((p) => `${p.name} (${p.email || 'not signed in'}, ${p.dir})`).join(', ')}; use the email`);
+  const email = looksLikeEmail(want) ? want : listed[0]?.email || null;
   const fail = (reason) => {
     const how = named
       ? `computercub menu "Google Chrome" "Profiles > ${named}"`
       : `open -na "Google Chrome" --args --profile-email=${email || '<its email>'}`;
-    const inMenu = names.length ? `; Chrome's Profiles menu has ${names.map((n) => `"${n}"`).join(', ')}` : '';
+    const inMenu = names.length ? `; Chrome's Profiles menu has ${quoted(names)}` : '';
     return new Error(
       `no connected profile matches "${want}"; connected: ${all.map(describe).join(', ') || 'none'}${inMenu}. ${reason}. ` +
-        `Open a window for it (${how}), then try again${chromeProfiles() || named ? '' : `. ${NO_NAMES}`}`,
+        `Open a window for it (${how}), then try again${known || named ? '' : `. ${NO_NAMES}`}`,
     );
   };
-  // Where Chrome's list can be read, it has the email even for a name.
-  const listed = chromeProfiles()?.find((p) => matches(p, w)) || chromeProfiles()?.find((p) => roughly(p, w));
-  const email = looksLikeEmail(want) ? want : listed?.email || null;
   if (!named && !email) {
+    const near = [...new Set(nearly([...connected().flatMap((p) => [p.name, p.menuName, p.email]), ...names, ...(known || []).flatMap((p) => [p.name, p.email])], w))];
+    if (near.length) throw new Error(`no profile is called "${want}"; it has to be the whole name, email or folder. Did you mean ${quoted(near)}?`);
     throw fail(Array.isArray(menu) ? (names.length ? "it isn't in Chrome's Profiles menu" : "Chrome isn't running") : `BrowserBear couldn't read Chrome's Profiles menu (${menu.error})`);
   }
   // Opened a moment ago and nothing connected: another window won't help.
@@ -138,20 +174,20 @@ async function findProfile(want) {
         const fresh = connected().filter((p) => !before.has(p.instance));
         const p = email ? fresh.find((x) => x.email?.toLowerCase() === email.toLowerCase()) : fresh.length === 1 ? fresh[0] : null;
         if (p) {
-          if (named && !p.name) {
-            p.name = named;
-            if (p.email) menuNames.set(p.email, named);
-          }
+          if (named) setMenuName(p, named);
           learnNames(names); // opened by email: the menu may say its name
           return p;
         }
         await sleep(200);
       }
       noBear.set(key, Date.now());
+      // From the menu it may be a profile that's connected already, under an
+      // email the menu's name couldn't be matched to: nothing new would connect.
+      const unnamed = connected().filter((p) => p.email && !p.menuName).map((p) => p.email);
       throw fail(
         email
           ? `BrowserBear asked Chrome to open the profile signed in as ${email}, but nothing new connected in ${OPEN_WAIT_MS / 1000}s (no such profile, or BrowserBear isn't installed in it)`
-          : `BrowserBear opened "${named}" from Chrome's Profiles menu, but its extension didn't connect in ${OPEN_WAIT_MS / 1000}s (is BrowserBear installed in it?)`,
+          : `BrowserBear opened "${named}" from Chrome's Profiles menu, but its extension didn't connect in ${OPEN_WAIT_MS / 1000}s (is BrowserBear installed in it?${unnamed.length ? ` Or it may be one of ${unnamed.join(', ')}, already connected: use the email` : ''})`,
       );
     })().finally(() => opening.delete(w)));
   }
@@ -873,7 +909,7 @@ const commands = {
       const menu = await menuProfiles();
       const names = Array.isArray(menu) ? menu : [];
       learnNames(names);
-      const unmatched = names.filter((n) => !connected.some((p) => p.name === n));
+      const unmatched = names.filter((n) => !connected.some((p) => p.menuName === n));
       return [
         ...connected.map((p) => `● ${describe(p)}`),
         ...unmatched.map((n) => `○ ${n}`),
@@ -1206,7 +1242,7 @@ const server = net.createServer((conn) => {
         const old = profiles.get(msg.instance);
         // Same profile reconnecting: keep pending calls' bookkeeping fresh.
         if (old && old.conn !== conn) old.conn.destroy();
-        profile = { instance: msg.instance, email: msg.email, name: known.name || menuNames.get(msg.email), dir: known.dir, conn, pending: new Map() };
+        profile = { instance: msg.instance, email: msg.email, name: known.name || menuNames.get(msg.email), menuName: menuNames.get(msg.email), dir: known.dir, conn, pending: new Map() };
         profiles.set(msg.instance, profile);
         log('hello from', describe(profile), msg.version);
         marks.resend();

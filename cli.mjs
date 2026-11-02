@@ -36,8 +36,9 @@ const USAGE = `browserbear: let agents use your real Chrome profiles
   browserbear reload                            reload the extension everywhere after changing it
   browserbear status
 
-A profile is its Chrome name, email or folder: "Work", "you@company.com", "Default", "Profile 2".
-Names and folders need Chrome's profile list, which macOS can block; browserbear profiles shows what works.`;
+A profile is its whole Chrome name, email or folder, in any case: "Work", "you@company.com", "Default",
+"Profile 2". Part of a name doesn't count: you get the candidates back, and an error if two profiles share it.
+open and tabs print the profile they actually used. Names and folders need Chrome's profile list, which macOS can block; browserbear profiles shows what works.`;
 
 function parse(argv) {
   const flags = {};

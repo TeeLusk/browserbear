@@ -24,7 +24,9 @@ browserbear CLI (or Threadbear)
 ```
 
 - Profiles are named the way Chrome names them ("Work"), or by email or folder,
-  never by a number that changes between connects. Names and folders come from
+  never by a number that changes between connects. It has to be the whole thing (in
+  any case): part of a name gets you the candidates back rather than a guess, and
+  `open` prints the profile it used. Names and folders come from
   Chrome's `Local State` file; where macOS blocks that, the email and the names in
   Chrome's Profiles menu ("Michael (convex.dev)") still work, and
   `browserbear profiles` lists the menu's profiles too.
