@@ -1,10 +1,8 @@
 # Chrome Web Store listing (draft)
 
-Store build 0.1.2 was submitted as Paws on 29 Oct 2026, before the rename. Once
-it's approved, upload the BrowserBear build (0.2.0 or later: 0.2.0 adds `handoff`,
-which moves an agent's tab into your window) with this text, and point the privacy and
-homepage URLs at browserbear.mikecann.app (paws.mikecann.app serves the same site
-until then).
+Store build 0.1.2 went out as Paws (published 2 Nov 2026). The BrowserBear build replaces
+it with this text. Keep install.sh's `dev.paws.host` and the paws.mikecann.app route until
+a BrowserBear build is published: people on 0.1.2 still need both until it updates them.
 
 Visibility: **Unlisted**. Upload `dist/browserbear-<version>.zip` from
 `scripts/package.sh`.
@@ -48,6 +46,10 @@ tabs in this Chrome profile, through a local companion app.
 
 - `debugger`: the agent reads the page's accessibility tree and clicks and types in
   the tab, through the Chrome DevTools Protocol. This is the core of what it does.
+- `scripting`: draws the small label that marks a tab an agent is using, and hides it
+  while the agent takes a screenshot. Also clears frames other extensions have put in a
+  tab the agent was asked to use, because Chrome refuses to let the debugger into a tab
+  that holds one.
 - `nativeMessaging`: the only connection, to the BrowserBear service on the same Mac.
 - `tabs`: list open tabs so the user can point an agent at one.
 - `webNavigation`: tell the agent why a page failed to load (a certificate error, a dead
