@@ -46,6 +46,9 @@ browserbear CLI (or Threadbear)
   again.
 - A click, key or submit that starts a navigation waits for the next page before it
   answers, and `read` waits for a page with a body.
+- `type` reads the field back. If inserted text changed nothing it uses real key
+  presses, as a masked amount field needs, and if the field still hasn't changed, or
+  doesn't end up with the text in it, that's an error, before any `--submit`.
 - `type --replace` puts the text in over a selection as one edit, since a controlled
   field can restore its old value the moment it's emptied. It then reads the field back
   and fails, before any `--submit`, unless it holds exactly that text.

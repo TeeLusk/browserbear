@@ -744,13 +744,22 @@ const MODS = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
 // command named alongside the key.
 const MAC_COMMANDS = { 'Meta+a': 'selectAll', 'Meta+c': 'copy', 'Meta+x': 'cut', 'Meta+v': 'paste', 'Meta+z': 'undo', 'Meta+Shift+z': 'redo' };
 
+// Punctuation's char codes are other keys' key codes: 46, a full stop, is Delete,
+// which a page handling its own keydowns takes at its word.
+const PUNCTUATION = { '.': ['Period', 190], ',': ['Comma', 188], '-': ['Minus', 189], '=': ['Equal', 187], '/': ['Slash', 191], ';': ['Semicolon', 186], "'": ['Quote', 222], '[': ['BracketLeft', 219], ']': ['BracketRight', 221], '\\': ['Backslash', 220], '`': ['Backquote', 192], ' ': ['Space', 32] };
+function charKey(key) {
+  if (PUNCTUATION[key]) return { code: PUNCTUATION[key][0], keyCode: PUNCTUATION[key][1], text: key };
+  if (/^[0-9]$/.test(key)) return { code: `Digit${key}`, keyCode: key.charCodeAt(0), text: key };
+  return { code: `Key${key.toUpperCase()}`, keyCode: key.toUpperCase().charCodeAt(0), text: key };
+}
+
 // "Enter", "Meta+a", "Shift+Tab"
 async function pressKey(tabId, combo) {
   await cdp(tabId, 'Page.enable');
   const parts = combo.split('+');
   const key = parts.pop();
   const modifiers = parts.reduce((m, p) => m | (MODS[p] || 0), 0);
-  const k = KEYS[key] || { code: `Key${key.toUpperCase()}`, keyCode: key.toUpperCase().charCodeAt(0), text: key };
+  const k = KEYS[key] || charKey(key);
   const ev = { key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode, modifiers };
   // Text only goes with an unmodified key, or Cmd+A would type an "a". Shift+Enter
   // is the exception: without its text Chrome sends the keydown alone, with no
@@ -764,7 +773,22 @@ async function pressKey(tabId, combo) {
   await cdp(tabId, 'Input.dispatchKeyEvent', { ...ev, type: 'keyUp' });
 }
 
-// The field type --replace means: the ref if it's editable, otherwise whatever
+// Text as real key presses, one character at a time. Not through pressKey, which
+// would take a "+" for a combination. Real input is held back on a tab you can't
+// see, so an agent's tab comes forward first; your own tabs aren't pulled forward.
+async function typeKeys(tabId, text) {
+  const p = await ownerOf(tabId);
+  const tab = (await call(p, 'tabs')).find((t) => t.tabId === tabId);
+  if (!tab?.active && bearTabs.has(tabId)) await call(p, 'show', { tabId });
+  for (const key of text) {
+    const k = charKey(key);
+    const ev = { key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode };
+    await cdp(tabId, 'Input.dispatchKeyEvent', { ...ev, type: 'keyDown', text: key });
+    await cdp(tabId, 'Input.dispatchKeyEvent', { ...ev, type: 'keyUp' });
+  }
+}
+
+// The field type and --replace mean: the ref if it's editable, otherwise whatever
 // has focus (a ref on a wrapper, or no ref), through shadow roots and iframes.
 const FIELD = `
   const editable = (e) => e && (e.tagName === 'INPUT' || e.tagName === 'TEXTAREA' || e.isContentEditable);
@@ -786,6 +810,53 @@ const SELECT_FIELD = `
   else field.ownerDocument.getSelection().selectAllChildren(field);
   return true;`;
 const READ_FIELD = `return { value: field.value ?? field.innerText, rich: field.value === undefined, secret: field.type === 'password' };`;
+
+// The element itself, held on to: a code box can move focus on as soon as it has
+// a digit, and the next box being empty doesn't mean the digit was ignored.
+async function pinField(tabId, node) {
+  const target = node ? (await cdp(tabId, 'DOM.resolveNode', { backendNodeId: node })).object : (await cdp(tabId, 'Runtime.evaluate', { expression: 'document.documentElement' })).result;
+  const { result } = await cdp(tabId, 'Runtime.callFunctionOn', { objectId: target.objectId, functionDeclaration: `function () {${FIELD} return field;}` });
+  return result?.objectId || null;
+}
+
+const readPinned = async (tabId, objectId) =>
+  (await cdp(tabId, 'Runtime.callFunctionOn', { objectId, functionDeclaration: `function () { const field = this; ${READ_FIELD} }`, returnByValue: true })).result?.value ?? null;
+
+// Letters and digits, so a page's own commas, currency signs and capitals don't count.
+const bare = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+const shown = (read) => (read.secret ? "something else (a password field, so it isn't shown)" : JSON.stringify(read.value));
+
+// Plain type's check on what happened. insertText fires the events real typing
+// does, which rich editors listen for and setting .value doesn't fire, but a masked
+// field can do its own typing from keydown and ignore it (the amount on eToro's
+// order panel stayed empty and type said "(no change)", 2 Nov). So a field that
+// hasn't changed gets real keys, and one that still hasn't is an error, as is one
+// that ends up without the text in it. Runs before any --submit.
+//
+// A field that really does take the text away (a tag field, on a comma) looks the
+// same as one that ignored it, so its text gets typed twice; the note says so.
+// Multi-line text is left alone: a composer can send on a line break and empty.
+async function typeChecked(tabId, node, text) {
+  const field = text && !text.includes('\n') ? await pinField(tabId, node).catch(() => null) : null;
+  const before = field && (await readPinned(tabId, field).catch(() => null));
+  await cdp(tabId, 'Input.insertText', { text });
+  await settle();
+  if (!before) return ''; // a canvas editor, say: nothing to read back
+  // Gone means the page moved on or redrew the field, which isn't a sign of trouble.
+  let after = await readPinned(tabId, field).catch(() => null);
+  if (!after) return '';
+  let note = '';
+  if (after.value === before.value) {
+    if (node) await clickNode(tabId, node);
+    await typeKeys(tabId, text);
+    await settle();
+    after = (await readPinned(tabId, field).catch(() => null)) || after;
+    if (after.value === before.value) throw new Error(`type didn't work on tab ${tabId}: the field still holds ${before.secret ? 'what it did (a password field, so it isn\'t shown)' : JSON.stringify(before.value)}, so ${JSON.stringify(text)} didn't go in, by inserted text or by real keys. Nothing was submitted. Is it disabled or read-only? snap to see`);
+    note = '(the page ignored inserted text, so that was real key presses)';
+  }
+  if (!bare(after.value).includes(bare(text))) throw new Error(`type didn't work on tab ${tabId}: the field holds ${shown(after)}, which doesn't have ${JSON.stringify(text)} in it. Nothing was submitted. The page may have cut it short or changed it; snap to see`);
+  return note;
+}
 
 // Rich editors wrap text in their own paragraphs, so only the words count there.
 const flatten = (s) => s.replace(/\s+/g, ' ').trim();
@@ -812,14 +883,20 @@ async function replaceText(tabId, node, text) {
   await pressKey(tabId, 'Meta+a');
   await pressKey(tabId, 'Backspace');
   await settle();
+  const cleared = await onField(tabId, node, READ_FIELD);
   if (text) await cdp(tabId, 'Input.insertText', { text });
   await settle();
-  const read = await onField(tabId, node, READ_FIELD);
+  let read = await onField(tabId, node, READ_FIELD);
+  // Ignored the inserted text, as a masked field does (see typeChecked).
+  if (text && read && read.value === cleared?.value) {
+    await typeKeys(tabId, text);
+    await settle();
+    read = await onField(tabId, node, READ_FIELD);
+  }
   // A canvas editor (Google Docs) has no field to read back.
   if (!read) return "(this editor can't be read back, so check below that the text was replaced)";
   if (holds(read, text)) return '';
-  const now = read.secret ? 'something else (a password field, so it isn\'t shown)' : JSON.stringify(read.value);
-  throw new Error(`--replace didn't work on tab ${tabId}: the field holds ${now}, not ${JSON.stringify(text)}. Nothing was submitted. The page may have changed or reformatted it; snap to see`);
+  throw new Error(`--replace didn't work on tab ${tabId}: the field holds ${shown(read)}, not ${JSON.stringify(text)}. Nothing was submitted. The page may have changed or reformatted it; snap to see`);
 }
 
 async function evaluate(tabId, expression) {
@@ -1007,16 +1084,13 @@ const commands = {
       const node = await nodeFor(tab, ref);
       await cdp(tab, 'DOM.focus', { backendNodeId: node }).catch(() => clickNode(tab, node));
     }
-    // insertText fires the same beforeinput/input events as real typing, which
-    // rich editors (Discord, Slack, Studio) listen for; setting .value doesn't.
-    let note = '';
-    if (replace) note = await replaceText(tab, ref ? await nodeFor(tab, ref) : null, text);
-    else await cdp(tab, 'Input.insertText', { text });
+    const node = ref ? await nodeFor(tab, ref) : null;
+    const note = replace ? await replaceText(tab, node, text) : await typeChecked(tab, node, text);
     if (submit) {
       await markPage(tab);
       await pressKey(tab, 'Enter');
       await settleAfterAction(tab);
-    } else if (!replace) await settle(); // replaceText has waited already
+    }
     return (note ? note + '\n' : '') + (await snapshot(tab));
   },
 

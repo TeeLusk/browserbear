@@ -18,6 +18,7 @@ const USAGE = `browserbear: let agents use your real Chrome profiles
   browserbear click <tab> <ref> [--script]       --script: a script click, for pages that ignore real ones
                                                 (a link that ignores a real click gets one by itself)
   browserbear type <tab> <ref|-> <text> [--submit] [--replace]
+                                                fails if the text does not end up in the field
   browserbear key <tab> <key>                   Enter, Escape, Tab, Meta+a, Shift+Enter (a line break), ...
   browserbear goto <tab> <url>
   browserbear read <tab>                        the page's text
