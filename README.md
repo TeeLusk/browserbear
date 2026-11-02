@@ -25,8 +25,13 @@ browserbear CLI (or Threadbear)
 
 - Profiles are named the way Chrome names them ("Work"), or by email or folder,
   never by a number that changes between connects. Names and folders come from
-  Chrome's `Local State` file; where macOS blocks that, only the email works, and
-  `browserbear profiles` says so.
+  Chrome's `Local State` file; where macOS blocks that, the email and the names in
+  Chrome's Profiles menu ("Michael (convex.dev)") still work, and
+  `browserbear profiles` lists the menu's profiles too.
+- A profile with no Chrome window open has no extension running, so it isn't
+  connected. Ask for it anyway and BrowserBear opens a window for it (by email with
+  Chrome's `--profile-email`, or by name from the Profiles menu, which needs
+  Accessibility), waits for it to connect and carries on.
 - Snapshots list headings and things you can click or type in, with refs (`e12`) that
   stay on the same element. After the first look you get only what changed, so most
   steps cost a few hundred tokens rather than 15k.

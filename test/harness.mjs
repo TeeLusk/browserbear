@@ -17,7 +17,17 @@ export async function startBear(t, onOp, extraEnv = {}) {
   const localState = path.join(home, 'Local State');
   fs.writeFileSync(localState, JSON.stringify({ profile: { info_cache: { 'Profile 2': { name: 'Work', user_name: 'me@example.com' } } } }));
   // No real Threadbear: tests that want one pass a fake tb and a thread id.
-  const env = { ...process.env, BROWSERBEAR_HOME: home, BROWSERBEAR_CHROME_LOCAL_STATE: localState, BROWSERBEAR_TB: '', THREADBEAR_THREAD_ID: '', ...extraEnv };
+  // A fake Chrome too, so a profile that isn't connected never opens a window
+  // in the real one. Its Profiles menu is empty unless a test sets FAKE_MENU.
+  const env = {
+    ...process.env,
+    BROWSERBEAR_HOME: home,
+    BROWSERBEAR_CHROME_LOCAL_STATE: localState,
+    BROWSERBEAR_CHROME_CTL: path.join(root, 'test', 'fakes', 'chrome-ctl.mjs'),
+    BROWSERBEAR_TB: '',
+    THREADBEAR_THREAD_ID: '',
+    ...extraEnv,
+  };
 
   const host = spawn(process.execPath, [path.join(root, 'host', 'browserbear-host.mjs'), 'chrome-extension://x/'], { env });
   const notices = []; // { type } messages from the host and service, for the setup page

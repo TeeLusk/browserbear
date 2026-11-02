@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOME, LOGS, OUT, SOCKET, line, lineReader } from './wire.mjs';
 import { createMarks } from './marks.mjs';
+import { domainOf, looksLikeEmail, menuProfiles, openByEmail, openByMenu } from './chrome.mjs';
 import { RefMap, compact, diff, sameApartFromFocus } from './snapshot.mjs';
 
 fs.mkdirSync(LOGS, { recursive: true, mode: 0o700 });
@@ -52,19 +53,115 @@ function describe(p) {
   return p.name ? `${p.name}${p.email ? ` (${p.email})` : ''}` : p.email || p.instance.slice(0, 8);
 }
 
-function findProfile(want) {
+// Names from Chrome's Profiles menu that BrowserBear has matched to a
+// connected profile's email, so a profile keeps its name when it reconnects.
+const menuNames = new Map(); // email -> "Michael (convex.dev)"
+
+// Give connected profiles their names from the Profiles menu, where the menu
+// says which one it is: a name with the email's domain in brackets, and only
+// one such name.
+function learnNames(menu) {
+  for (const p of profiles.values()) {
+    if (p.name || !p.email) continue;
+    const domain = p.email.split('@')[1].toLowerCase();
+    const names = menu.filter((n) => domainOf(n) === domain);
+    if (names.length === 1) {
+      p.name = names[0];
+      menuNames.set(p.email, names[0]);
+    }
+  }
+}
+
+const matches = (p, w) => [p.name, p.email, p.dir].some((v) => v?.toLowerCase() === w);
+const roughly = (p, w) => [p.name, p.email].some((v) => v?.toLowerCase().includes(w));
+
+async function findProfile(want) {
   const all = [...profiles.values()];
   if (!want) {
     if (all.length === 1) return all[0];
     throw new Error(`say which profile: ${all.map(describe).join(', ') || 'none connected'}`);
   }
   const w = want.toLowerCase();
-  const hit =
-    all.find((p) => [p.name, p.email, p.dir].some((v) => v?.toLowerCase() === w)) ||
-    all.find((p) => [p.name, p.email].some((v) => v?.toLowerCase().includes(w)));
-  if (!hit) throw new Error(`no connected profile matches "${want}"; connected: ${all.map(describe).join(', ') || 'none'}${chromeProfiles() ? '' : `. ${NO_NAMES}`}`);
-  return hit;
+  const connected = () => [...profiles.values()];
+  const find = () => connected().find((p) => matches(p, w)) || connected().find((p) => roughly(p, w));
+  let hit = find();
+  if (hit) return hit;
+  // Not connected: most likely Chrome has no window open for it, so its
+  // extension isn't running. Open it, rather than send the agent off to do it
+  // (Title lab, 2 Nov: a Codex agent gave up here).
+  const menu = await menuProfiles();
+  if (Array.isArray(menu)) {
+    learnNames(menu);
+    if ((hit = find())) return hit;
+  }
+  const names = Array.isArray(menu) ? menu : [];
+  const named = names.find((n) => n.toLowerCase() === w) || (() => {
+    const near = names.filter((n) => n.toLowerCase().includes(w));
+    if (near.length > 1) throw new Error(`"${want}" could be any of ${near.map((n) => `"${n}"`).join(', ')}; say which`);
+    return near[0];
+  })();
+  const fail = (reason) => {
+    const how = named
+      ? `computercub menu "Google Chrome" "Profiles > ${named}"`
+      : `open -na "Google Chrome" --args --profile-email=${email || '<its email>'}`;
+    const inMenu = names.length ? `; Chrome's Profiles menu has ${names.map((n) => `"${n}"`).join(', ')}` : '';
+    return new Error(
+      `no connected profile matches "${want}"; connected: ${all.map(describe).join(', ') || 'none'}${inMenu}. ${reason}. ` +
+        `Open a window for it (${how}), then try again${chromeProfiles() || named ? '' : `. ${NO_NAMES}`}`,
+    );
+  };
+  // Where Chrome's list can be read, it has the email even for a name.
+  const listed = chromeProfiles()?.find((p) => matches(p, w)) || chromeProfiles()?.find((p) => roughly(p, w));
+  const email = looksLikeEmail(want) ? want : listed?.email || null;
+  if (!named && !email) {
+    throw fail(Array.isArray(menu) ? (names.length ? "it isn't in Chrome's Profiles menu" : "Chrome isn't running") : `BrowserBear couldn't read Chrome's Profiles menu (${menu.error})`);
+  }
+  // Opened a moment ago and nothing connected: another window won't help.
+  const key = email || named;
+  if (Date.now() - (noBear.get(key) || 0) < NO_BEAR_MS) {
+    throw fail(`BrowserBear opened it a few minutes ago and its extension never connected, so it's probably not installed in that profile; it won't open another window for it until ${NO_BEAR_MS / 60_000} minutes have passed`);
+  }
+  if (!opening.has(w)) {
+    const before = new Set(profiles.keys());
+    opening.set(w, (async () => {
+      try {
+        if (email) await openByEmail(email);
+        else await openByMenu(named);
+      } catch (e) {
+        throw fail(`BrowserBear couldn't open it (${e.message})`);
+      }
+      log('opened Chrome profile', want);
+      // Its extension says hello once the window is up, usually within a second
+      // or two. From the menu, the name is only known from what turns up new.
+      const deadline = Date.now() + OPEN_WAIT_MS;
+      while (Date.now() < deadline) {
+        const fresh = connected().filter((p) => !before.has(p.instance));
+        const p = email ? fresh.find((x) => x.email?.toLowerCase() === email.toLowerCase()) : fresh.length === 1 ? fresh[0] : null;
+        if (p) {
+          if (named && !p.name) {
+            p.name = named;
+            if (p.email) menuNames.set(p.email, named);
+          }
+          learnNames(names); // opened by email: the menu may say its name
+          return p;
+        }
+        await sleep(200);
+      }
+      noBear.set(key, Date.now());
+      throw fail(
+        email
+          ? `BrowserBear asked Chrome to open the profile signed in as ${email}, but nothing new connected in ${OPEN_WAIT_MS / 1000}s (no such profile, or BrowserBear isn't installed in it)`
+          : `BrowserBear opened "${named}" from Chrome's Profiles menu, but its extension didn't connect in ${OPEN_WAIT_MS / 1000}s (is BrowserBear installed in it?)`,
+      );
+    })().finally(() => opening.delete(w)));
+  }
+  return opening.get(w);
 }
+
+const opening = new Map(); // what was asked for -> the profile it's opening
+const OPEN_WAIT_MS = Number(process.env.BROWSERBEAR_OPEN_WAIT_MS) || 20_000;
+const noBear = new Map(); // email or menu name -> when it was opened and nothing connected
+const NO_BEAR_MS = 10 * 60_000;
 
 function call(profile, op, args = {}, timeoutMs = 30_000) {
   const id = nextId++;
@@ -762,7 +859,21 @@ const commands = {
   async profiles() {
     const connected = [...profiles.values()];
     const known = chromeProfiles();
-    if (!known) return [...connected.map((p) => `● ${describe(p)}`), `(${NO_NAMES})`].join('\n');
+    if (!known) {
+      // Chrome's Profiles menu still says which profiles exist.
+      const menu = await menuProfiles();
+      const names = Array.isArray(menu) ? menu : [];
+      learnNames(names);
+      const unmatched = names.filter((n) => !connected.some((p) => p.name === n));
+      return [
+        ...connected.map((p) => `● ${describe(p)}`),
+        ...unmatched.map((n) => `○ ${n}`),
+        unmatched.length
+          ? `(○ is in Chrome's Profiles menu but not matched to a connected profile: BrowserBear only learns a connected profile's email, so it may be one of the ● above. \`--profile "<name>"\` opens it.)`
+          : Array.isArray(menu) ? null : `(BrowserBear couldn't read Chrome's Profiles menu: ${menu.error}. \`--profile <email>\` still opens a profile that isn't connected.)`,
+        `(${NO_NAMES})`,
+      ].filter(Boolean).join('\n');
+    }
     return known.map((p) => {
       const c = connected.find((x) => x.email && x.email === p.email);
       return `${c ? '●' : '○'} ${p.name} (${p.email || 'not signed in'}, ${p.dir})${c ? '' : ': extension not connected'}`;
@@ -770,7 +881,7 @@ const commands = {
   },
 
   async tabs({ profile }) {
-    const list = profile ? [findProfile(profile)] : [...profiles.values()];
+    const list = profile ? [await findProfile(profile)] : [...profiles.values()];
     const out = [];
     for (const p of list) {
       out.push(`${describe(p)}:`);
@@ -783,7 +894,7 @@ const commands = {
   },
 
   async open({ profile, url, thread }) {
-    const p = findProfile(profile);
+    const p = await findProfile(profile);
     const tab = remember(p.instance, await call(p, 'open', { url }, 40_000));
     marks.used(tab.tabId, thread, `opening ${hostOf(url)}`);
     bearTabs.add(tab.tabId);
@@ -806,7 +917,7 @@ const commands = {
 
   // Find one of Mike's own tabs by a bit of its URL or title.
   async claim({ match, profile, thread }) {
-    const list = profile ? [findProfile(profile)] : [...profiles.values()];
+    const list = profile ? [await findProfile(profile)] : [...profiles.values()];
     const hits = [];
     for (const p of list) {
       for (const t of await call(p, 'tabs')) {
@@ -1086,7 +1197,7 @@ const server = net.createServer((conn) => {
         const old = profiles.get(msg.instance);
         // Same profile reconnecting: keep pending calls' bookkeeping fresh.
         if (old && old.conn !== conn) old.conn.destroy();
-        profile = { instance: msg.instance, email: msg.email, name: known.name, dir: known.dir, conn, pending: new Map() };
+        profile = { instance: msg.instance, email: msg.email, name: known.name || menuNames.get(msg.email), dir: known.dir, conn, pending: new Map() };
         profiles.set(msg.instance, profile);
         log('hello from', describe(profile), msg.version);
         marks.resend();
