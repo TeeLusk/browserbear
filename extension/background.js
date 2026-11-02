@@ -597,8 +597,12 @@ async function blankExtensionFrames(tabId) {
             if (shadow) visit(shadow);
             if (!['IFRAME', 'FRAME', 'EMBED', 'OBJECT'].includes(el.tagName)) continue;
             const m = /^chrome-extension:\/\/([a-p]{32})/.exec(el.src || el.data || '');
-            if (!m || m[1] === self) continue;
-            ids.push(m[1]);
+            // 1Password's sign-on frame says about:blank, then sends itself to its
+            // own page, so its src gives nothing away (auth.convex.dev, 2 Nov). A
+            // really blank frame shares our origin; that one's document is shut to us.
+            const moved = el.tagName === 'IFRAME' && /^(about:blank)?$/.test(el.src) && el.contentDocument === null;
+            if (m ? m[1] === self : !moved) continue;
+            ids.push(m ? m[1] : 'a frame hiding its address');
             el.style.setProperty('display', 'none', 'important');
             if (el.tagName === 'OBJECT') el.data = 'about:blank';
             else el.src = 'about:blank';

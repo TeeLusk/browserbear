@@ -141,3 +141,14 @@ test('the real extension reports a certificate error and navigates away from it'
   const dead = await inWorker(`ops.open({ url: 'http://127.0.0.1:9/' })`);
   assert.match(dead.loadError, /^net::ERR_/);
 });
+
+// The extension rewords this refusal, so Chrome's own wording means old code is
+// running in that profile, with the current version number (Discord, 2 Nov).
+test('a refusal in Chrome\'s own wording says to reload the extension', async (t) => {
+  const { browserbear } = await startBear(t, ({ op }) => {
+    if (op === 'tabs') return [{ tabId: 7, url: 'https://example.com/', title: 'Example', active: true }];
+    if (op === 'cdp') throw new Error('Cannot access a chrome-extension:// URL of different extension');
+    return true;
+  });
+  await assert.rejects(browserbear('eval', '7', '1'), /older BrowserBear extension code.*browserbear reload/);
+});

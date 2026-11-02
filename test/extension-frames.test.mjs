@@ -42,4 +42,9 @@ test("another extension's frame doesn't lock BrowserBear out of the tab", { skip
   // The menu is already up before BrowserBear first attaches: refused, then let in.
   const tab2 = await openTab(`${url}?now`);
   assert.equal(await cdp(tab2, 'document.title'), 'Address');
+
+  // The frame's src says about:blank, and it has moved itself to its extension's
+  // page (1Password's sign-on frame on auth.convex.dev, 2 Nov).
+  const tab3 = await openTab(`${url}?hidden`);
+  assert.equal(await cdp(tab3, 'document.title'), 'Address');
 });

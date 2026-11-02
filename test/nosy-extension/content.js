@@ -13,3 +13,13 @@ const menu = () => {
 document.addEventListener('focusin', (e) => e.target instanceof HTMLInputElement && menu());
 // ?now: the menu is already up before BrowserBear first attaches.
 if (location.search === '?now') addEventListener('load', menu);
+// ?hidden: like 1Password's sign-on frame, its src says about:blank and it sends
+// itself to the extension's page afterwards, so the DOM doesn't show where it is.
+if (location.search === '?hidden') addEventListener('load', () => {
+  const host = document.createElement('nosy-sign-on');
+  const frame = document.createElement('iframe');
+  frame.src = 'about:blank';
+  host.attachShadow({ mode: 'closed' }).append(frame);
+  document.body.append(host);
+  frame.contentWindow.location.href = chrome.runtime.getURL('menu.html');
+});

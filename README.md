@@ -52,7 +52,11 @@ browserbear CLI (or Threadbear)
   needs the `scripting` permission. It has to scan the page's DOM to find them, shadow
   roots included: `webNavigation.getAllFrames` doesn't list other extensions' frames, and
   `chrome.dom.openOrClosedShadowRoot` throws on non-HTML elements like `<svg>`, so call
-  it on HTML elements only.
+  it on HTML elements only. A frame can also say `about:blank` and then send itself to
+  its extension's page (1Password's sign-on frame), so an iframe that says blank but
+  whose document is shut to us counts too.
+- `key Shift+Enter` adds a line break in rich editors, and `type` keeps the newlines in
+  its text. Neither sends a Discord message; only `Enter` or `--submit` do.
 
 ## Install (for now)
 

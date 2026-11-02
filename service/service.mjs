@@ -244,6 +244,11 @@ async function cdp(tabId, method, params, timeoutMs = CDP_WAIT_MS) {
     if (/does not belong to the document|No node with given id|Could not find node with given id/.test(e.message)) {
       throw new Error(`that ref is from a page tab ${tabId} has since left; snap ${tabId} for fresh refs`);
     }
+    // The extension turns this into its own wording once it has tried clearing
+    // the frame, so Chrome's wording arriving here means old code is still running
+    // in that profile, reporting the current version (Discord, 2 Nov: a reload got
+    // straight back in).
+    if (/URL of different extension/.test(e.message)) throw new Error(`${describe(p)} is running older BrowserBear extension code, which can't clear another extension's frame out of tab ${tabId}. The page itself is fine; browserbear reload, then try again`);
     if (!/Cannot attach to this target/.test(e.message)) throw e;
     throw await refusal(p, tabId);
   }
@@ -711,11 +716,15 @@ async function pressKey(tabId, combo) {
   const modifiers = parts.reduce((m, p) => m | (MODS[p] || 0), 0);
   const k = KEYS[key] || { code: `Key${key.toUpperCase()}`, keyCode: key.toUpperCase().charCodeAt(0), text: key };
   const ev = { key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode, modifiers };
-  // Text only goes with an unmodified key, or Cmd+A would type an "a".
+  // Text only goes with an unmodified key, or Cmd+A would type an "a". Shift+Enter
+  // is the exception: without its text Chrome sends the keydown alone, with no
+  // keypress or beforeinput (insertLineBreak), so Slate editors like Discord's never
+  // saw a line break (2 Nov).
+  const text = !modifiers || combo === 'Shift+Enter' ? k.text : undefined;
   const commands = MAC_COMMANDS[combo] ? [MAC_COMMANDS[combo]] : undefined;
-  // The editing command only runs on a full keyDown; rawKeyDown ignores it.
-  const type = modifiers && !commands ? 'rawKeyDown' : 'keyDown';
-  await cdp(tabId, 'Input.dispatchKeyEvent', { ...ev, type, text: modifiers ? undefined : k.text, commands });
+  // The editing command and the text only work on a full keyDown; rawKeyDown ignores them.
+  const type = modifiers && !commands && !text ? 'rawKeyDown' : 'keyDown';
+  await cdp(tabId, 'Input.dispatchKeyEvent', { ...ev, type, text, commands });
   await cdp(tabId, 'Input.dispatchKeyEvent', { ...ev, type: 'keyUp' });
 }
 
