@@ -1,0 +1,36 @@
+<!doctype html>
+<!-- The Web Store screenshot and the site's picture (site/public/screenshot.png). Screenshot it
+     at 1280x800 with no alpha. The commands are made up but match the real output. -->
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 1280px; height: 800px; background: #F3EEE6; color: #2B2722;
+    font-family: Inter, -apple-system, system-ui, sans-serif; overflow: hidden; }
+  .left { position: absolute; left: 79px; top: 276px; width: 340px; }
+  .left img { width: 80px; height: 80px; display: block; margin-bottom: 30px; }
+  h1 { font-size: 50px; line-height: 1.1; margin: 0 0 22px; font-weight: 700; letter-spacing: -0.01em; }
+  p { font-size: 24px; line-height: 34px; margin: 0; color: #5A534B; }
+  pre { position: absolute; left: 473px; top: 161px; width: 660px; height: 422px; margin: 0;
+    padding: 28px 34px; background: #24201C; border-radius: 22px; color: #F4EFE6;
+    font: 20px/27.9px Menlo, monospace; box-shadow: 0 24px 60px rgba(43, 39, 34, 0.18); }
+  .d { color: #8F877C; } .g { color: #7FB377; } .p { color: #D98A5B; }
+</style>
+<div class="left">
+  <img src="../extension/icons/icon-128.png" alt="">
+  <h1>BrowserBear</h1>
+  <p>Your AI agents, using your real Chrome profiles.</p>
+</div>
+<pre><span class="d">$</span> browserbear profiles
+<span class="g">●</span> Personal (you@gmail.com)
+<span class="g">●</span> Work (you@company.com)
+
+<span class="d">$</span> browserbear claim studio.youtube.com
+tab 812: Channel content - YouTube Studio
+e4  textbox "Search across your channel"
+e9  button "Create"
+e12 menuitem "Content"
+e25 button "Sort by Date"
+
+<span class="d">$</span> browserbear click 812 e9
+<span class="p">+</span> e40 menuitem "Upload videos"
+<span class="p">+</span> e41 menuitem "Go live"
+(38 unchanged)</pre>
