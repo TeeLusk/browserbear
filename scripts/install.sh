@@ -41,9 +41,8 @@ cat > "$hosts/dev.browserbear.host.json" <<EOF
   "allowed_origins": ["chrome-extension://$store_id/", "chrome-extension://$dev_id/"]
 }
 EOF
-# Store build 0.1.2 went out as Paws and asks for the old host name. Keep
-# answering to it until a BrowserBear build has replaced it in the store.
-sed 's/"dev.browserbear.host"/"dev.paws.host"/' "$hosts/dev.browserbear.host.json" > "$hosts/dev.paws.host.json"
+# Paws's store build used this name; BrowserBear replaced it in the store on 3 Nov 2026.
+rm -f "$hosts/dev.paws.host.json"
 
 # --store: have Chrome offer the Web Store build in every profile, new ones too
 # (each asks once, "keep it?"). The same mechanism Google Drive's launcher uses.

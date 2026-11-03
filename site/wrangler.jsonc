@@ -4,10 +4,6 @@
   "name": "browserbear-site",
   "compatibility_date": "2026-10-29",
   "assets": { "directory": "./public", "html_handling": "auto-trailing-slash" },
-  // paws.mikecann.app is the old name, still the privacy URL in the store listing.
-  "routes": [
-    { "pattern": "browserbear.mikecann.app", "custom_domain": true },
-    { "pattern": "paws.mikecann.app", "custom_domain": true }
-  ],
+  "routes": [{ "pattern": "browserbear.mikecann.app", "custom_domain": true }],
   "workers_dev": false
 }

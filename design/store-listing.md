@@ -1,8 +1,8 @@
 # Chrome Web Store listing (draft)
 
-Store build 0.1.2 went out as Paws (published 2 Nov 2026). The BrowserBear build replaces
-it with this text. Keep install.sh's `dev.paws.host` and the paws.mikecann.app route until
-a BrowserBear build is published: people on 0.1.2 still need both until it updates them.
+Live: BrowserBear 0.3.4, published 3 Nov 2026 (it replaced Paws 0.1.2). Each new upload
+needs a version bump and goes through review again; new permissions need a justification
+on the Privacy tab before it can be submitted.
 
 Visibility: **Unlisted**. Upload `dist/browserbear-<version>.zip` from
 `scripts/package.sh`.
