@@ -102,7 +102,11 @@ const quoted = (names) => names.map((n) => `"${n}"`).join(', ');
 // profile really called Michael had no name yet, and an agent ended up signed
 // in as the wrong person (James interview, 3 Nov). Being sent back to say it
 // properly costs one try; the wrong account can cost a lot more.
-const isCalled = (p, w) => [p.name, p.menuName, p.email, p.dir].some((v) => v?.toLowerCase() === w);
+// Also by the "Name (email)" BrowserBear itself prints in its lists and errors,
+// since agents copy that back (5 Nov: "Michael (mike.cann@gmail.com)" was
+// refused by the very error that listed it). It's still the whole of one.
+const printed = (p) => (p.name && p.email ? `${p.name} (${p.email})` : null);
+const isCalled = (p, w) => [p.name, p.menuName, p.email, p.dir, printed(p)].some((v) => v?.toLowerCase() === w);
 const nearly = (names, w) => names.filter((n) => n?.toLowerCase().includes(w));
 
 async function findProfile(want) {

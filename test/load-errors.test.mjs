@@ -152,3 +152,9 @@ test('a refusal in Chrome\'s own wording says to reload the extension', async (t
   });
   await assert.rejects(browserbear('eval', '7', '1'), /older BrowserBear extension code.*browserbear reload/);
 });
+
+test('a profile is found by the "Name (email)" its own errors print', async (t) => {
+  const { browserbear } = await startBear(t, ({ op }) => (op === 'tabs' ? [] : true));
+  await assert.rejects(browserbear('tabs', '--profile', 'Default'), /connected: Work \(me@example\.com\)/);
+  assert.match(await browserbear('tabs', '--profile', 'Work (me@example.com)'), /Work \(me@example\.com\):/);
+});
