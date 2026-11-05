@@ -18,6 +18,11 @@ import path from 'node:path';
 const WORKING_MS = Number(process.env.BROWSERBEAR_WORKING_MS) || 12_000;
 const TICK_MS = Number(process.env.BROWSERBEAR_MARK_TICK_MS) || 4_000;
 const LONE_MS = 120_000;
+// How long since a `handoff --wait` last looked before it counts as gone.
+const WAIT_SEEN_MS = 10_000;
+// The green "Thanks" before the marks come off. The pill's own fade (drawMark
+// in extension/background.js) finishes just before this.
+const THANKS_MS = Number(process.env.BROWSERBEAR_THANKS_MS) || 3_000;
 
 function tbPath() {
   if ('BROWSERBEAR_TB' in process.env) return process.env.BROWSERBEAR_TB || null;
@@ -45,7 +50,8 @@ const shortName = (title) => {
 // send(tabId, mark | null) draws or clears a tab's marks; it rejects with
 // "No tab with id" once the tab is gone.
 export function createMarks({ send, log }) {
-  const claims = new Map(); // tabId -> { thread, action, at, busy, yours, sent }
+  const claims = new Map(); // tabId -> { thread, action, at, busy, yours, sent, waitSeen, doneClicked, thanks }
+  const released = new Set(); // tabs you pressed ✕ on, which a wait mustn't mark again
   let threads = null; // id -> thread, from tb list; null until it first answers
   let threadsAt = 0;
   let site; // the Threadbear website, where "Open thread" goes without the Mac app; null if there isn't one
@@ -76,6 +82,11 @@ export function createMarks({ send, log }) {
     if (c.thread && threads && !t) return null; // archived, or deleted
     // The pill's Open thread: the Mac app's link (Threadbear's ThreadLink).
     const base = { name: t ? shortName(t.title) : 'agent', url: t ? `threadbear://thread/${t.id}` : null };
+    // State "working" for its green, so a store build older than `thanks` still goes green.
+    if (c.thanks) return now - c.thanks < THANKS_MS ? { ...base, url: null, state: 'working', action: 'Thanks, carrying on', stop: false, thanks: true } : null;
+    // An agent waiting in the background has ended its turn, so the thread can
+    // look done with the tab when it isn't. `finish` is the pill's Done button.
+    if (c.yours && now - (c.waitSeen || 0) < WAIT_SEEN_MS) return { ...base, state: 'yours', action: 'over to you', stop: false, finish: true };
     if (t) {
       const running = t.status === 'running';
       const needsYou = !running && (t.needsYou || t.needs === 'you');
@@ -132,7 +143,7 @@ export function createMarks({ send, log }) {
     // A command on the tab is starting (begin) or has finished (end).
     begin(tabId, thread, action) {
       const c = claim(tabId, thread);
-      Object.assign(c, { busy: c.busy + 1, at: Date.now(), action, yours: false });
+      Object.assign(c, { busy: c.busy + 1, at: Date.now(), action, yours: false, thanks: 0, doneClicked: false });
       soon(tabId);
     },
     end(tabId) {
@@ -146,15 +157,40 @@ export function createMarks({ send, log }) {
       this.end(tabId);
     },
     handedOff(tabId, thread) {
-      Object.assign(claim(tabId, thread), { yours: true, at: Date.now() });
+      released.delete(tabId);
+      Object.assign(claim(tabId, thread), { yours: true, at: Date.now(), thanks: 0, doneClicked: false });
       soon(tabId);
+    },
+    // A `handoff --wait` is still watching this tab. Marks live in memory, so
+    // after a service restart this also puts the bar's claim back.
+    waiting(tabId, thread) {
+      if (released.has(tabId)) return;
+      if (!claims.has(tabId)) Object.assign(claim(tabId, thread), { yours: true, at: Date.now() });
+      claims.get(tabId).waitSeen = Date.now();
+      soon(tabId);
+    },
+    // The pill's Done button. The wait hears on its next look.
+    clickedDone(tabId) {
+      const c = claims.get(tabId);
+      if (c) c.doneClicked = true;
+    },
+    doneClicked: (tabId) => !!claims.get(tabId)?.doneClicked,
+    // The wait saw you finish: a moment of green, then the marks come off.
+    finished(tabId) {
+      const c = claims.get(tabId);
+      if (!c) return; // you pressed ✕ on it
+      Object.assign(c, { yours: false, waitSeen: 0, doneClicked: false, thanks: Date.now() });
+      push(tabId);
+      setTimeout(() => push(tabId), THANKS_MS + 50).unref();
     },
     closed(tabId) {
       claims.delete(tabId);
+      released.delete(tabId);
     },
     // From the pill's buttons.
     async release(tabId) {
       claims.delete(tabId);
+      released.add(tabId);
       await send(tabId, null).catch(() => {});
     },
     // Opens the thread in the Mac app, with `open` rather than from Chrome,

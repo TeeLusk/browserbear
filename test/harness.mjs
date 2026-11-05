@@ -59,7 +59,7 @@ export async function startBear(t, onOp, extraEnv = {}) {
     await new Promise((r) => setTimeout(r, 150));
     profiles = await browserbear('profiles').catch(() => '');
   }
-  return { browserbear, notices, profiles, home };
+  return { browserbear, notices, profiles, home, env, fromExtension: reply };
 }
 
 export const CHROME = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';

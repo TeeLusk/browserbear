@@ -928,7 +928,7 @@ async function handoffHint(tabId) {
   if (!bearTabs.has(tabId)) return '';
   const signIn = await evaluate(tabId, SIGN_IN).catch(() => false);
   return signIn
-    ? `\n(this looks like a sign-in page, in BrowserBear's own window, which the user may not be looking at. If they have to sign in: browserbear handoff ${tabId})`
+    ? `\n(this looks like a sign-in page, in BrowserBear's own window, which the user may not be looking at. If they have to sign in: browserbear handoff ${tabId} --wait)`
     : '';
 }
 
@@ -1188,7 +1188,7 @@ const commands = {
   async show({ tab }) {
     await call(await ownerOf(tab), 'show', { tabId: tab });
     if (!bearTabs.has(tab)) return `tab ${tab} is at the front of its window`;
-    return `tab ${tab} is at the front of BrowserBear's window, which the user may not be looking at. To have them do something in it: browserbear handoff ${tab}`;
+    return `tab ${tab} is at the front of BrowserBear's window, which the user may not be looking at. To have them do something in it: browserbear handoff ${tab} --wait`;
   },
 
   // Gives a tab to the user: an agent's tab moves from BrowserBear's window
@@ -1196,7 +1196,8 @@ const commands = {
   // Given a URL rather than an id, it finds the agent tab already on that
   // page (Threadbear does this for the link buttons on an agent's asks, so
   // you don't get a second tab of the same page).
-  async handoff({ tab, thread }) {
+  // With `wait` the CLI goes on to watch it, through handoffLook.
+  async handoff({ tab, thread, wait }) {
     const tabId = typeof tab === 'number' ? tab : await agentTabFor(tab);
     const p = await ownerOf(tabId);
     const t = await call(p, 'handoff', { tabId }).catch((e) => {
@@ -1205,11 +1206,52 @@ const commands = {
       if (typeof tab === 'string' && /no tab with id/i.test(e.message) && sentTo.delete(tabId)) return null;
       throw e;
     });
-    if (!t) return commands.handoff({ tab, thread });
+    if (!t) return commands.handoff({ tab, thread, wait });
     marks.handedOff(tabId, thread);
     // It's the user's now: no more pulling it forward for real clicks.
     bearTabs.delete(tabId);
-    return `tab ${tabId} is in front of the user, in their own Chrome window: ${t.title} <${t.url}>\nSay so when you ask them; a link to the same page as well would open a second tab.`;
+    const handed = `tab ${tabId} is in front of the user, in their own Chrome window: ${t.title} <${t.url}>`;
+    if (wait) return { tabId, message: `${handed}\nWaiting for them to finish; they don't need to reply. A link to the same page as well would open a second tab.` };
+    return `${handed}\nSay so when you ask them; a link to the same page as well would open a second tab. To carry on by yourself when they've finished, without them replying: browserbear handoff ${tabId} --wait`;
+  },
+
+  // One look at a tab handed to the user, for `handoff --wait`. No debugger
+  // here, only what the extension can see without one: it's their tab, and
+  // they may be typing a password in it. `unknown` is "can't tell right now"
+  // (a profile reconnecting), which is different from the tab having gone.
+  async handoffLook({ tab, text, thread }) {
+    if (!profiles.size) return { unknown: true };
+    let tabs;
+    try {
+      tabs = await call(await ownerOf(tab), 'tabs');
+    } catch (e) {
+      return /^no tab /.test(e.message) ? { gone: true } : { unknown: true };
+    }
+    const t = tabs.find((x) => x.tabId === tab);
+    if (!t) {
+      marks.closed(tab);
+      return { gone: true };
+    }
+    marks.waiting(tab, thread);
+    // Moved back into BrowserBear's window: the agent's to pull forward again.
+    if (t.bear) bearTabs.add(tab);
+    const seen = await call(await ownerOf(tab), 'probe', { tabId: tab, text }).catch((e) => (/unknown op/.test(e.message) ? { old: true } : {}));
+    if (seen.old && text) return { textUnsupported: true };
+    return {
+      url: t.url,
+      title: t.title,
+      status: t.status,
+      loadError: t.loadError,
+      bear: t.bear,
+      signInForm: seen.signInForm,
+      text: seen.text,
+      doneClicked: marks.doneClicked(tab),
+    };
+  },
+
+  async handoffFinished({ tab }) {
+    marks.finished(tab);
+    return true;
   },
 
   // After changing the extension's files: reloads it in every connected
@@ -1259,6 +1301,7 @@ function onHostMessage(profile, msg) {
     if (msg.event === 'mark' && msg.action === 'open') marks.open(msg.tabId);
     if (msg.event === 'mark' && msg.action === 'stop') marks.stop(msg.tabId);
     if (msg.event === 'mark' && msg.action === 'release') marks.release(msg.tabId);
+    if (msg.event === 'mark' && msg.action === 'done') marks.clickedDone(msg.tabId);
     return;
   }
   const waiter = profile.pending.get(msg.id);

@@ -95,6 +95,7 @@ browserbear upload 1234 e12 ~/talk.mp3         # e12 can be the "Choose files" b
 browserbear read 1234                          # page text; long pages go to a file
 browserbear shot 1234                          # prints the PNG path
 browserbear handoff 1234                       # your turn: the tab moves into your window
+browserbear handoff 1234 --wait                # ...and the agent carries on by itself when you've finished
 ```
 
 Agents work in a window of BrowserBear's own, so they never take over the tab
@@ -105,6 +106,20 @@ screen you aren't looking at. `open` and `goto` say so when a page looks like
 a sign-in. Given a URL, `handoff` finds the agent tab on that page; Threadbear
 does that when you click a link an agent gave you, so you don't end up with
 two tabs of the same sign-in.
+
+With `--wait`, you don't have to go back and tell the agent you've finished. It
+waits (run it as a background task) until the tab has left the page it was handed
+over on and settled somewhere that isn't another sign-in step, so a password page
+leading to a code page leading to a consent page still counts as one job. The bar
+on the tab has a Done button for whatever that can't see. When you've finished the
+bar goes green and says "Thanks, carrying on", then fades, and the command prints
+where the tab ended up. If a page's address won't change, or a checkout has several
+steps, the agent says what finished looks like: `--until-url '*console.cloud.google.com/*'`
+or `--until-text "Payment received"`. Exits 0 when you've finished (including if you
+drag the tab back to BrowserBear's window), 2 if you closed the tab and 124 at the
+timeout (`--timeout <seconds>`, 20 minutes by default). It watches through the tab's
+address and a yes-or-no question to the page, never the debugger, which would put
+Chrome's debugging bar up and clear your password manager's menu while you type.
 
 Every tab an agent uses is marked, so you can tell it from yours. The tab's
 title starts with 🐻 and the thread's name, its icon gets a dot (green while

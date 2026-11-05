@@ -7,6 +7,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { HOME, SOCKET, line, lineReader } from './service/wire.mjs';
+import { createHandoffWatch } from './service/handoff-wait.mjs';
 
 const USAGE = `browserbear: let agents use your real Chrome profiles
 
@@ -33,6 +34,16 @@ const USAGE = `browserbear: let agents use your real Chrome profiles
   browserbear handoff <tab|url>                 before asking the user to do something in a tab (sign in,
                                                 pay, approve): moves it from BrowserBear's window into theirs
                                                 and focuses it. A URL finds the agent tab on that page.
+  browserbear handoff <tab|url> --wait [--until-url <glob>] [--until-text <text>] [--timeout <seconds>]
+                                                the same, then waits until they've finished and prints where the
+                                                tab ended up, so they needn't reply "done". Run it as a background
+                                                task. Finished means the tab has left that page and settled on one
+                                                that isn't a sign-in, or they clicked Done on the tab's bar, or
+                                                moved it back to BrowserBear's window. For a page whose address
+                                                won't change, or a checkout with several steps, say what finished
+                                                looks like: --until-url (* is a wildcard) or --until-text.
+                                                Exits 0 when finished, 2 if they closed the tab, 124 at the timeout
+                                                (default 20 minutes; run it again to keep waiting).
   browserbear close <tab>
   browserbear reload                            reload the extension everywhere after changing it
   browserbear status
@@ -51,7 +62,7 @@ function parse(argv) {
       const next = argv[i + 1];
       // --group is gone (Chrome kept every group on the bookmarks bar), but
       // still eats its value so old commands don't read it as a URL.
-      if (next !== undefined && !next.startsWith('--') && ['profile', 'group'].includes(key)) flags[key] = argv[++i];
+      if (next !== undefined && !next.startsWith('--') && ['profile', 'group', 'until-url', 'until-text', 'timeout'].includes(key)) flags[key] = argv[++i];
       else flags[key] = true;
     } else pos.push(a);
   }
@@ -141,6 +152,46 @@ function request(msg, { attempt = 0 } = {}) {
   });
 }
 
+const WAIT_POLL_MS = 1_500;
+const DEFAULT_WAIT_S = 20 * 60; // under the 30 minutes after which Threadbear calls a quiet shell stuck
+const CLOSED_AFTER = 5; // looks in a row, since a profile reconnecting can't see its tabs for a moment
+const thread = process.env.THREADBEAR_THREAD_ID || undefined;
+
+// Hands the tab over and watches it. The loop lives here, as one short request
+// per look, so the service can restart underneath it and nothing keeps
+// watching after an agent's killed this. Nothing here touches the debugger:
+// attaching one while you type a password would put up Chrome's debugging bar
+// and clear your password manager's menu (see cdp in extension/background.js).
+async function handoffAndWait({ tab, untilUrl, untilText, timeoutS }) {
+  const { tabId, message } = await request({ id: 1, cmd: 'handoff', args: { tab, wait: true }, thread });
+  console.log(message);
+  const start = Date.now();
+  const watch = createHandoffWatch({ untilUrl, untilText, start });
+  let last = null;
+  let goneFor = 0;
+  while (Date.now() - start < timeoutS * 1000) {
+    const look = await request({ id: 1, cmd: 'handoffLook', args: { tab: tabId, text: untilText }, thread }).catch(() => ({ unknown: true }));
+    if (look.textUnsupported) throw new Error(`this profile's BrowserBear extension is too old for --until-text; use --until-url, or update it`);
+    goneFor = look.gone ? goneFor + 1 : 0;
+    if (goneFor >= CLOSED_AFTER) {
+      console.log(`tab ${tabId} was closed before they finished${last ? `; it was last on ${last.title} <${last.url}>` : ''}. Ask them what happened rather than assume.`);
+      return 2;
+    }
+    if (!look.gone && !look.unknown) {
+      last = look;
+      const why = watch.see(look, Date.now());
+      if (why) {
+        await request({ id: 1, cmd: 'handoffFinished', args: { tab: tabId }, thread }).catch(() => {});
+        console.log(`the user has finished in tab ${tabId} (${why}). It's now on: ${look.title} <${look.url}>`);
+        return 0;
+      }
+    }
+    await new Promise((r) => setTimeout(r, WAIT_POLL_MS));
+  }
+  console.log(`timed out after ${timeoutS} s waiting for the user in tab ${tabId}${last ? `, still on ${last.title} <${last.url}>` : ''}. They may have stepped away: ask them, or run this again to keep waiting.`);
+  return 124;
+}
+
 // exitCode rather than process.exit(): exiting inside the top-level await
 // makes Node print "Detected unsettled top-level await" under every error.
 const { cmd, pos, flags } = parse(process.argv.slice(2));
@@ -150,10 +201,17 @@ if (!args) {
   process.exitCode = cmd && cmd !== 'help' ? 1 : 0;
 } else {
   try {
-    // Which Threadbear thread is asking, so the tabs it uses carry its name
-    // (service/marks.mjs). Unset outside Threadbear: the tab says "agent".
-    const result = await request({ id: 1, cmd, args, thread: process.env.THREADBEAR_THREAD_ID || undefined });
-    console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
+    if (cmd === 'handoff' && (flags.wait || flags['until-url'] || flags['until-text'])) {
+      const timeoutS = flags.timeout === undefined ? DEFAULT_WAIT_S : Number(flags.timeout);
+      if (!(timeoutS > 0)) throw new Error(`--timeout takes a number of seconds, not ${flags.timeout}`);
+      for (const f of ['until-url', 'until-text']) if (flags[f] === true) throw new Error(`--${f} needs a value`);
+      process.exitCode = await handoffAndWait({ tab: args.tab, untilUrl: flags['until-url'], untilText: flags['until-text'], timeoutS });
+    } else {
+      // Which Threadbear thread is asking, so the tabs it uses carry its name
+      // (service/marks.mjs). Unset outside Threadbear: the tab says "agent".
+      const result = await request({ id: 1, cmd, args, thread });
+      console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
+    }
   } catch (e) {
     console.error(`browserbear: ${e.message}`);
     process.exitCode = 1;

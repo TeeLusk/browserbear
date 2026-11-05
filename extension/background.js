@@ -138,7 +138,7 @@ const ops = {
   async tabs() {
     const tabs = await chrome.tabs.query({});
     const { bearWindow, handedOff = [] } = await chrome.storage.session.get(['bearWindow', 'handedOff']);
-    return tabs.map((t) => ({ ...tabInfo(t), agent: t.windowId === bearWindow || handedOff.includes(t.id) }));
+    return tabs.map((t) => ({ ...tabInfo(t), agent: t.windowId === bearWindow || handedOff.includes(t.id), bear: t.windowId === bearWindow }));
   },
 
   // Opens the tab in a window of BrowserBear's own (one per profile, made the first
@@ -211,6 +211,10 @@ const ops = {
   // tabs stay where they are; they just come forward.
   async handoff({ tabId }) {
     let tab = await chrome.tabs.get(tabId);
+    // Not yet idle from the agent's last command, the debugger would keep
+    // Chrome's bar across the page you're about to use, and Chrome cuts it off
+    // anyway when your password manager's menu appears.
+    await detach(tabId);
     const { bearWindow, handedOff = [] } = await chrome.storage.session.get(['bearWindow', 'handedOff']);
     const agents = tab.windowId === bearWindow;
     const mine = agents && (await userWindow());
@@ -225,6 +229,17 @@ const ops = {
     // find this tab again rather than open a second one.
     if (agents && !handedOff.includes(tabId)) await chrome.storage.session.set({ handedOff: [...handedOff, tabId] });
     return tabInfo(tab);
+  },
+
+  // What `handoff --wait` asks about a tab you're working in. Through
+  // scripting rather than the debugger, which would put Chrome's bar up and
+  // clear your password manager's menu while you sign in. Says only yes or no:
+  // nothing from the page comes back. Every frame, as sign-ins and card forms
+  // are often in one. A page that can't be scripted gives null, not "no".
+  async probe({ tabId, text }) {
+    const frames = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: probePage, args: [text ?? null] }).catch(() => []);
+    if (!frames.length) return { signInForm: null, text: false };
+    return { signInForm: frames.some((f) => f.result?.signInForm), text: frames.some((f) => f.result?.text) };
   },
 
   async focus({ tabId }) {
@@ -335,7 +350,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   const tab = sender.tab;
   if (msg.action === 'release') ops.mark({ tabId: tab.id, mark: null }).catch(() => {});
   // The service opens the thread in Threadbear's Mac app (Chrome would ask first).
-  if (['open', 'stop', 'release'].includes(msg.action)) post({ type: 'event', event: 'mark', action: msg.action, tabId: tab.id });
+  if (['open', 'stop', 'release', 'done'].includes(msg.action)) post({ type: 'event', event: 'mark', action: msg.action, tabId: tab.id });
 });
 
 // The pill is in the page, so it would catch an agent's real clicks (and
@@ -400,6 +415,18 @@ async function badgedIcon(tabId, state) {
   return url;
 }
 
+// Runs in the page. Only fields you can see: sites hide spare password fields
+// (Google's first sign-in step has one). Text matches as you'd read it, whatever
+// its case or line breaks.
+function probePage(text) {
+  const tidy = (s) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+  const fields = document.querySelectorAll('input[type=password], input[autocomplete="one-time-code"]');
+  return {
+    signInForm: [...fields].some((f) => f.checkVisibility()),
+    text: text != null && tidy(document.body?.innerText || '').includes(tidy(text)),
+  };
+}
+
 // Runs in the page. The site's icon, before the mark replaced it.
 function siteIcon() {
   const saved = window.__browserbearMark?.siteIcon;
@@ -434,6 +461,12 @@ function drawMark(mark, icon) {
         font:13px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.25);opacity:.96}
       .dot{width:8px;height:8px;border-radius:50%;flex:none}
       .working .dot{animation:pulse 1.4s ease-in-out infinite}
+      .pill.thanks{background:#15803d;color:#fff;padding-right:12px}
+      .pill.thanks .dot{background:#fff !important;animation:none}
+      .fading{animation:fade .7s ease 2.2s forwards}
+      @keyframes fade{to{opacity:0}}
+      button.done{background:#16a34a}
+      button.done:hover{background:#22c55e}
       @keyframes pulse{50%{box-shadow:0 0 0 5px rgba(34,197,94,.25)}}
       .text{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       .text b{color:#fff;font-weight:600}
@@ -442,12 +475,13 @@ function drawMark(mark, icon) {
       .x{padding:4px 7px;background:none;color:#9ca3af}
       .idle{padding-top:4px;padding-bottom:4px;opacity:.85}
     </style><div class=glow></div><div class=pill><i class=dot></i><span class=text></span>
-      <button class=open>Open thread</button><button class=stop>Stop</button><button class=x title="Leave this tab alone">✕</button></div>`;
+      <button class=done title="I've finished here, carry on">Done</button><button class=open>Open thread</button><button class=stop>Stop</button><button class=x title="Leave this tab alone">✕</button></div>`;
     const $ = (sel) => root.querySelector(sel);
-    m.parts = { glow: $('.glow'), pill: $('.pill'), dot: $('.dot'), text: $('.text'), open: $('.open'), stop: $('.stop') };
+    m.parts = { glow: $('.glow'), pill: $('.pill'), dot: $('.dot'), text: $('.text'), open: $('.open'), stop: $('.stop'), done: $('.done') };
     const send = (action) => chrome.runtime.sendMessage({ type: 'mark-action', action }).catch(() => {});
     $('.open').onclick = () => send('open');
     $('.stop').onclick = () => send('stop');
+    $('.done').onclick = () => send('done');
     $('.x').onclick = () => send('release');
 
     m.hide = (hidden) => {
@@ -497,12 +531,14 @@ function drawMark(mark, icon) {
   }
   const colour = { working: '#22c55e', yours: '#f59e0b', idle: '#9ca3af' }[mark.state] || '#9ca3af';
   const p = m.parts;
-  p.pill.className = `pill ${mark.state}`;
+  p.pill.className = `pill ${mark.state}${mark.thanks ? ' thanks fading' : ''}`;
+  p.glow.className = `glow${mark.thanks ? ' fading' : ''}`;
   p.dot.style.background = colour;
   p.text.textContent = '';
   p.text.append('🐻 ', Object.assign(document.createElement('b'), { textContent: mark.name }), ` · ${mark.action}`);
   p.open.style.display = mark.url ? '' : 'none';
   p.stop.style.display = mark.stop ? '' : 'none';
+  p.done.style.display = mark.finish ? '' : 'none';
   // The glow only while it's busy or waiting on you; an idle tab just keeps the small pill.
   p.glow.style.boxShadow = mark.state === 'idle' ? 'none' : `inset 0 0 0 3px ${colour}, inset 0 0 24px ${colour}55`;
   m.observer.disconnect();
