@@ -45,7 +45,11 @@ browserbear CLI (or Threadbear)
   is in flight), so there's nothing to kill after an edit. Refs don't survive that: snap
   again.
 - A click, key or submit that starts a navigation waits for the next page before it
-  answers, and `read` waits for a page with a body.
+  answers, and `read` waits for a page with a body. A button that seems to have done
+  nothing gets a few seconds more before that's reported, and a tab that closes itself
+  (a sign-in popup finishing) is reported as that, not as a failure or "(no change)".
+- `type` into a code split across one-character boxes fills the row one character per
+  box, leaving out spaces and dashes, and reads it back.
 - `type` reads the field back. If inserted text changed nothing it uses real key
   presses, as a masked amount field needs, and if the field still hasn't changed, or
   doesn't end up with the text in it, that's an error, before any `--submit`.

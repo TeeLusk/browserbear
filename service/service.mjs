@@ -223,6 +223,16 @@ async function ownerOf(tabId) {
   return found;
 }
 
+const closedMessage = (tabId) => `tab ${tabId} has closed, so there's nothing left to act on. browserbear tabs lists what's open`;
+
+// The tab as its profile sees it right now: null if it has gone, undefined if
+// that can't be told (the profile's reconnecting, say).
+async function tabNow(tabId) {
+  const p = profiles.get(tabOwner.get(tabId));
+  const tabs = p && (await call(p, 'tabs').catch(() => null));
+  return tabs ? (tabs.find((t) => t.tabId === tabId) ?? null) : undefined;
+}
+
 const marks = createMarks({
   send: async (tabId, mark) => call(await ownerOf(tabId), 'mark', { tabId, mark }, 5_000),
   log,
@@ -285,6 +295,9 @@ async function cdp(tabId, method, params, timeoutMs = CDP_WAIT_MS) {
     // in that profile, reporting the current version (Discord, 2 Nov: a reload got
     // straight back in).
     if (/URL of different extension/.test(e.message)) throw new Error(`${describe(p)} is running older BrowserBear extension code, which can't clear another extension's frame out of tab ${tabId}. The page itself is fine; browserbear reload, then try again`);
+    // Chrome's "No tab with given id" reads like a BrowserBear bug. What it means
+    // is the page closed, usually by itself: a sign-in popup that's finished.
+    if (/no tab with (given )?id/i.test(e.message)) throw Object.assign(new Error(closedMessage(tabId)), { closed: true });
     if (!/Cannot attach to this target/.test(e.message)) throw e;
     throw await refusal(p, tabId);
   }
@@ -398,11 +411,14 @@ async function hitsTarget(tabId, backendNodeId, at) {
   return result.value ? { ok: false, what: result.value } : { ok: true };
 }
 
-const isLink = async (tabId, backendNodeId) => {
+const within = async (tabId, backendNodeId, selector) => {
   const { object } = await cdp(tabId, 'DOM.resolveNode', { backendNodeId });
-  const { result } = await cdp(tabId, 'Runtime.callFunctionOn', { objectId: object.objectId, functionDeclaration: `function () { return !!this.closest?.('a[href]'); }`, returnByValue: true });
+  const { result } = await cdp(tabId, 'Runtime.callFunctionOn', { objectId: object.objectId, functionDeclaration: `function (selector) { return !!this.closest?.(selector); }`, arguments: [{ value: selector }], returnByValue: true });
   return result?.value === true;
 };
+const isLink = (tabId, backendNodeId) => within(tabId, backendNodeId, 'a[href]');
+// What's clicked to make something happen, as opposed to a field clicked for focus.
+const isButton = (tabId, backendNodeId) => within(tabId, backendNodeId, 'a[href], button, summary, input[type=submit], input[type=button], [role=button], [role=link], [role=menuitem]');
 
 async function scriptClick(tabId, backendNodeId) {
   const { object } = await cdp(tabId, 'DOM.resolveNode', { backendNodeId });
@@ -535,7 +551,9 @@ async function settleAfterAction(tabId, timeoutMs = 20_000) {
     // Mid-navigation there may be no context to evaluate in yet.
     // Refused: it went to a warning page, which won't change by waiting, and
     // the snapshot after this says so.
-    const [mark, ready] = (await evaluate(tabId, `[window.__browserbear ?? null, document.readyState]`).catch((e) => (e.refused ? ['here'] : null))) || ['leaving'];
+    const look = await evaluate(tabId, `[window.__browserbear ?? null, document.readyState]`).catch((e) => (e.refused ? ['here'] : null));
+    if (!look && (await tabNow(tabId)) === null) return; // it closed, which isn't going to load
+    const [mark, ready] = look || ['leaving'];
     if (mark === 'here') break;
     if (mark === null) navigated = true;
     if (mark === 'leaving' && !navigated && Date.now() > leavingUntil) break;
@@ -544,6 +562,56 @@ async function settleAfterAction(tabId, timeoutMs = 20_000) {
       break;
     }
     await sleep(250);
+  }
+}
+
+// Some buttons act after the settle: Google's "Continue" popup for claude.ai
+// waits on its server and then closes itself, so click said "(no change)" and
+// suggested --script, and the retry hit a tab that had gone (5 Nov). So a button
+// that seems to have done nothing gets a little longer before that's reported.
+const LATE_MS = 2_500;
+
+async function lateEffect(tabId) {
+  const start = await tabNow(tabId);
+  for (const until = Date.now() + LATE_MS; Date.now() < until; ) {
+    await sleep(250);
+    const now = await tabNow(tabId);
+    if (now === null || now?.url !== start?.url) break;
+  }
+  await settleAfterAction(tabId);
+}
+
+// Runs something that can end with its own tab closing. That isn't a failure:
+// it's how a sign-in popup says it's finished, and it can happen part-way through
+// a command, which then fails on whatever it tried next. A tab that had already
+// gone before this started is a real error, or a retry would claim it had worked,
+// and so is one that went before anything was sent to it: `act` calls its argument
+// just before it does. Even then a closed tab doesn't prove the sign-in succeeded,
+// so the note says what was seen and where to look.
+async function orClosed(tabId, act) {
+  await ownerOf(tabId);
+  if ((await tabNow(tabId)) === null) throw new Error(closedMessage(tabId));
+  let sent = false;
+  try {
+    return await act(() => {
+      sent = true;
+    });
+  } catch (e) {
+    // Chrome can say the session ended a moment before the tab leaves its list.
+    const looksClosed = /has closed|detached|not attached|target closed|no tab/i.test(e.message);
+    for (let i = looksClosed ? 5 : 1; i > 0; i--) {
+      if ((await tabNow(tabId)) === null) {
+        tabState.delete(tabId);
+        marks.closed(tabId);
+        tabOwner.delete(tabId);
+        bearTabs.delete(tabId);
+        sentTo.delete(tabId);
+        if (!sent) throw new Error(closedMessage(tabId));
+        return `(tab ${tabId} closed straight after that, which is what a sign-in popup does when it has finished, so don't retry it. See whether the tab that opened it moved on: browserbear tabs lists what's open)`;
+      }
+      if (i > 1) await sleep(200);
+    }
+    throw e;
   }
 }
 
@@ -559,21 +627,24 @@ async function center(tabId, backendNodeId) {
 // event on a background tab, 29 Oct), so: BrowserBear's own tabs are brought to the
 // front of BrowserBear's window; your tabs are never pulled forward behind your back,
 // and get a script click instead, which most sites accept.
-async function clickNode(tabId, backendNodeId, { script = false } = {}) {
+async function clickNode(tabId, backendNodeId, { script = false, sending = () => {} } = {}) {
   const p = await ownerOf(tabId);
   let tab = (await call(p, 'tabs')).find((t) => t.tabId === tabId);
   if (!tab?.active && bearTabs.has(tabId)) tab = await call(p, 'show', { tabId });
   if (script) {
+    sending();
     await scriptClick(tabId, backendNodeId);
     return '(script click, as asked)';
   }
   const at = tab?.active ? await center(tabId, backendNodeId) : null;
   if (!at) {
+    sending();
     await scriptClick(tabId, backendNodeId);
     return tab?.active ? '' : `(tab ${tabId} is in the background, so that was a script click; browserbear show ${tabId} brings it forward for a real one)`;
   }
   const hit = await hitsTarget(tabId, backendNodeId, at);
   if (!hit.ok) {
+    sending();
     await scriptClick(tabId, backendNodeId);
     return `(${hit.what} was on top of it, so that was a script click)`;
   }
@@ -581,6 +652,7 @@ async function clickNode(tabId, backendNodeId, { script = false } = {}) {
   // No separate mouseMoved first: each input event waits for the page to draw
   // a frame (1.5-3 s apiece on a busy Mac, 29 Oct), and pressed at x,y
   // already moves the pointer there.
+  sending();
   try {
     await cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' }, INPUT_WAIT_MS);
     await cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' }, INPUT_WAIT_MS);
@@ -822,6 +894,83 @@ async function pinField(tabId, node) {
 const readPinned = async (tabId, objectId) =>
   (await cdp(tabId, 'Runtime.callFunctionOn', { objectId, functionDeclaration: `function () { const field = this; ${READ_FIELD} }`, returnByValue: true })).result?.value ?? null;
 
+// A code split across a row of one-character boxes (OpenAI's device page, 5 Nov:
+// nine, labelled "Code character 1 of 9"). All of it inserted into the first box
+// leaves its first character there and drops the rest. The row runs from the given
+// box on, so a code can be started part-way along, and only counts next to
+// neighbours of the same shape on the same line. Shape alone isn't enough, since
+// spreading text across fields that aren't a code would corrupt them (a row of
+// small quantity fields): it takes a one-character limit, which couldn't have held
+// the text anyway, or something saying it's a code.
+const SPLIT_ROW = `function () {
+  if (this.tagName !== 'INPUT') return null;
+  const labelOf = (i) => i.getAttribute('aria-label') || i.labels?.[0]?.innerText || i.placeholder || '';
+  const wide = (i) => i.getBoundingClientRect().width;
+  const top = (i) => i.getBoundingClientRect().top;
+  const says = (i) => i.autocomplete === 'one-time-code' || /otp|one.?time|verif|passcode|digit|code/i.test([labelOf(i), i.name, i.id].join(' '));
+  const marked = (i) => i.maxLength === 1 || (i.maxLength > 1 ? false : /(character|digit|code)\\b.*\\b\\d+\\s*(of|\\/)\\s*\\d+/i.test(labelOf(i)) || (wide(i) <= 60 && says(i)));
+  const inRow = (i) => i && i.type === this.type && Math.abs(wide(i) - wide(this)) <= 2 && Math.abs(top(i) - top(this)) <= 2 && marked(i);
+  if (!['text', 'tel', 'number', 'password'].includes(this.type) || !marked(this)) return null;
+  const all = [...this.getRootNode().querySelectorAll('input')].filter((i) => i === this || i.checkVisibility());
+  const at = all.indexOf(this);
+  let first = at, last = at;
+  while (inRow(all[first - 1])) first--;
+  while (inRow(all[last + 1])) last++;
+  return last > first ? all.slice(at, last + 1) : null;
+}`;
+
+// The boxes from this field on, or null if it isn't one of a row.
+async function splitRow(tabId, node) {
+  const field = await pinField(tabId, node).catch(() => null);
+  if (!field) return null;
+  const { result } = await cdp(tabId, 'Runtime.callFunctionOn', { objectId: field, functionDeclaration: SPLIT_ROW });
+  if (!result?.objectId) return null;
+  const { result: props } = await cdp(tabId, 'Runtime.getProperties', { objectId: result.objectId, ownProperties: true });
+  return props.filter((x) => /^\d+$/.test(x.name)).sort((a, b) => a.name - b.name).map((x) => x.value.objectId);
+}
+
+// Long enough for a page moving focus along in its own handler to have done it.
+const BOX_PAUSE_MS = 80;
+
+// One character per box, into each box by name rather than trusting the page to
+// move along, and over what it holds so a retry doesn't need clearing first. Real
+// keys for a box that ignores inserted text, as in typeChecked. The last box often
+// submits by itself, so this waits for the next page the way a click does. `left`
+// says the page has gone, so --submit shouldn't press Enter on whatever's next.
+async function typeSplit(tabId, boxes, chars) {
+  const total = chars.length;
+  const notBoxes = (what) => `type didn't work on tab ${tabId}: that's a code split across ${boxes.length} one-character boxes from this one on, ${what}`;
+  if (total > boxes.length) throw new Error(notBoxes(`and it needs ${total} (spaces and dashes don't count). Nothing was typed. Start from the row's first box, or check the code; snap to see`));
+  // Focusing a box that's been swapped out does nothing and doesn't fail, so without
+  // this check the next character would go into whatever the next screen has focused.
+  const select = (box) => cdp(tabId, 'Runtime.callFunctionOn', { objectId: box, functionDeclaration: `function () { if (!this.isConnected || !this.checkVisibility()) return false; this.focus(); this.select(); return true; }`, returnByValue: true }).then((r) => r.result?.value === true, () => false);
+  const read = (box) => readPinned(tabId, box).catch(() => null);
+  // Held elements stay readable after a single-page app swaps them out, so reading
+  // them can't tell that it has moved on to, say, an Authorize screen.
+  const here = (box) => cdp(tabId, 'Runtime.callFunctionOn', { objectId: box, functionDeclaration: `function () { return this.isConnected && this.checkVisibility(); }`, returnByValue: true }).then((r) => r.result?.value === true, () => false);
+  await markPage(tabId);
+  let done = 0;
+  for (; done < total; done++) {
+    const box = boxes[done];
+    const char = chars[done];
+    if (!(await select(box))) break; // the page has moved on underneath us
+    await cdp(tabId, 'Input.insertText', { text: char });
+    await sleep(BOX_PAUSE_MS);
+    const held = await read(box);
+    if (held && bare(held.value) !== bare(char) && (await select(box))) {
+      await typeKeys(tabId, char);
+      await sleep(BOX_PAUSE_MS);
+    }
+  }
+  await settleAfterAction(tabId);
+  const held = await Promise.all(boxes.slice(0, total).map(read));
+  const stayed = await Promise.all(boxes.slice(0, total).map(here));
+  if (done < total || held.some((r) => !r) || stayed.includes(false)) return { left: true, note: `(a code split across ${boxes.length} boxes; the page moved on after ${done} of ${total} characters went in, one per box)` };
+  const value = held.map((r) => r.value).join('');
+  if (bare(value) !== bare(chars.join(''))) throw new Error(notBoxes(`and after filling them one character at a time they hold ${shown({ value, secret: held.some((r) => r.secret) })}, not ${JSON.stringify(chars.join(''))}. Nothing else was pressed, but the page may have read what went in, or cleared them on a code it didn't like; snap to see, and each box can be typed into by its own ref`));
+  return { left: false, note: `(a code split across ${boxes.length} boxes, so ${total > 1 ? 'it went in one character per box' : 'that went over what its box held'})` };
+}
+
 // Letters and digits, so a page's own commas, currency signs and capitals don't count.
 const bare = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 const shown = (read) => (read.secret ? "something else (a password field, so it isn't shown)" : JSON.stringify(read.value));
@@ -854,7 +1003,10 @@ async function typeChecked(tabId, node, text) {
     if (after.value === before.value) throw new Error(`type didn't work on tab ${tabId}: the field still holds ${before.secret ? 'what it did (a password field, so it isn\'t shown)' : JSON.stringify(before.value)}, so ${JSON.stringify(text)} didn't go in, by inserted text or by real keys. Nothing was submitted. Is it disabled or read-only? snap to see`);
     note = '(the page ignored inserted text, so that was real key presses)';
   }
-  if (!bare(after.value).includes(bare(text))) throw new Error(`type didn't work on tab ${tabId}: the field holds ${shown(after)}, which doesn't have ${JSON.stringify(text)} in it. Nothing was submitted. The page may have cut it short or changed it; snap to see`);
+  // One character kept out of several is what a code box does when typeSplit can't
+  // see its neighbours (each in a shadow root of its own, say).
+  const oneBox = [...after.value].length === 1 && bare(text).length > 1 ? ". If this is a row of one-character boxes, type each character into its own box by its ref" : '';
+  if (!bare(after.value).includes(bare(text))) throw new Error(`type didn't work on tab ${tabId}: the field holds ${shown(after)}, which doesn't have ${JSON.stringify(text)} in it. Nothing was submitted. The page may have cut it short or changed it; snap to see${oneBox}`);
   return note;
 }
 
@@ -905,9 +1057,10 @@ async function evaluate(tabId, expression) {
   return r.result.value;
 }
 
-// For the waits on a page to load: a refusal won't get better by trying again.
+// For the waits on a page to load: a refusal or a closed tab won't get better by
+// trying again.
 const unlessRefused = (e) => {
-  if (e.refused) throw e;
+  if (e.refused || e.closed) throw e;
   return null;
 };
 
@@ -1057,49 +1210,71 @@ const commands = {
 
   snap: ({ tab, full }) => snapshot(tab, { full }),
 
-  async click({ tab, ref, script }) {
-    const node = await nodeFor(tab, ref);
-    const before = state(tab).last;
-    await markPage(tab);
-    const note = await clickNode(tab, node, { script });
-    await settleAfterAction(tab);
-    let out = await snapshot(tab);
-    const unchanged = !script && sameApartFromFocus(before, state(tab).last);
-    // A link that ignored a real click but takes a script one (BTC Markets'
-    // "SELL BTC", 30 Oct). Following a link twice is harmless, so it's just
-    // done; anything else might be a toggle, so that's left to the agent.
-    if (unchanged && !note && (await isLink(tab, node).catch(() => false))) {
-      await markPage(tab);
-      await scriptClick(tab, node);
-      await settleAfterAction(tab);
-      return `(the real click on that link changed nothing, so it was clicked again by script)\n${await snapshot(tab)}`;
-    }
-    // A click that changed nothing visible is often one the page ignored.
-    if (unchanged) out += `\n(if that click should have done something: browserbear click ${tab} ${ref} --script)`;
-    return (note ? note + '\n' : '') + out;
-  },
-
-  async type({ tab, ref, text, submit, replace }) {
-    if (ref) {
+  click: ({ tab, ref, script }) =>
+    orClosed(tab, async (sending) => {
       const node = await nodeFor(tab, ref);
-      await cdp(tab, 'DOM.focus', { backendNodeId: node }).catch(() => clickNode(tab, node));
-    }
-    const node = ref ? await nodeFor(tab, ref) : null;
-    const note = replace ? await replaceText(tab, node, text) : await typeChecked(tab, node, text);
-    if (submit) {
+      const before = state(tab).last;
+      const startUrl = (await tabNow(tab))?.url;
       await markPage(tab);
-      await pressKey(tab, 'Enter');
+      const note = await clickNode(tab, node, { script, sending });
       await settleAfterAction(tab);
-    }
-    return (note ? note + '\n' : '') + (await snapshot(tab));
-  },
+      let out = await snapshot(tab);
+      // A new address counts by itself: history.pushState can leave every control as it was.
+      const stayedPut = async () => sameApartFromFocus(before, state(tab).last) && (await tabNow(tab))?.url === startUrl;
+      let same = await stayedPut();
+      if (same && (await isButton(tab, node).catch(() => false))) {
+        await markPage(tab);
+        await lateEffect(tab);
+        const later = await snapshot(tab);
+        same = await stayedPut();
+        if (!same) out = later;
+      }
+      const unchanged = !script && same;
+      // A link that ignored a real click but takes a script one (BTC Markets'
+      // "SELL BTC", 30 Oct). Following a link twice is harmless, so it's just
+      // done; anything else might be a toggle, so that's left to the agent.
+      if (unchanged && !note && (await isLink(tab, node).catch(() => false))) {
+        await markPage(tab);
+        await scriptClick(tab, node);
+        await settleAfterAction(tab);
+        return `(the real click on that link changed nothing, so it was clicked again by script)\n${await snapshot(tab)}`;
+      }
+      // A click that changed nothing visible is often one the page ignored.
+      if (unchanged) out += `\n(if that click should have done something: browserbear click ${tab} ${ref} --script)`;
+      return (note ? note + '\n' : '') + out;
+    }),
 
-  async key({ tab, key }) {
-    await markPage(tab);
-    await pressKey(tab, key);
-    await settleAfterAction(tab);
-    return snapshot(tab);
-  },
+  type: ({ tab, ref, text, submit, replace }) =>
+    orClosed(tab, async (sending) => {
+      if (ref) {
+        const node = await nodeFor(tab, ref);
+        await cdp(tab, 'DOM.focus', { backendNodeId: node }).catch(() => clickNode(tab, node));
+      }
+      const node = ref ? await nodeFor(tab, ref) : null;
+      // Separators are on the page between the boxes, not in them. Before --replace
+      // too: its check that the field holds exactly the text can't pass on one box.
+      const chars = text.includes('\n') ? [] : [...text.replace(/[\s-]/g, '')];
+      // One character too: a full box won't take it any other way.
+      const boxes = chars.length ? await splitRow(tab, node).catch(() => null) : null;
+      sending();
+      const { note, left } = boxes ? await typeSplit(tab, boxes, chars) : { note: replace ? await replaceText(tab, node, text) : await typeChecked(tab, node, text) };
+      if (submit && !left) {
+        await markPage(tab);
+        await pressKey(tab, 'Enter');
+        await settleAfterAction(tab);
+      }
+      return (note ? note + '\n' : '') + (await snapshot(tab));
+    }),
+
+  key: ({ tab, key }) =>
+    orClosed(tab, async (sending) => {
+      await markPage(tab);
+      await cdp(tab, 'Page.enable');
+      sending();
+      await pressKey(tab, key);
+      await settleAfterAction(tab);
+      return snapshot(tab);
+    }),
 
   async goto({ tab, url }) {
     const p = await ownerOf(tab);
