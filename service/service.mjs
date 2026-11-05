@@ -5,6 +5,7 @@
 //
 // The page logic lives here rather than in the extension, so changing how
 // snapshots or clicks work never needs a new extension release.
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -105,6 +106,8 @@ const isCalled = (p, w) => [p.name, p.menuName, p.email, p.dir].some((v) => v?.t
 const nearly = (names, w) => names.filter((n) => n?.toLowerCase().includes(w));
 
 async function findProfile(want) {
+  // The agent's own Chrome: started when it's first asked for (agent/agent-host.mjs).
+  if (String(want).toLowerCase() === 'agent' && !profiles.has('agent-chrome')) await startAgentChrome();
   const all = [...profiles.values()];
   if (!want) {
     if (all.length === 1) return all[0];
@@ -192,6 +195,18 @@ async function findProfile(want) {
     })().finally(() => opening.delete(w)));
   }
   return opening.get(w);
+}
+
+let agentChrome = null;
+function startAgentChrome() {
+  agentChrome ||= (async () => {
+    const host = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'agent', 'agent-host.mjs');
+    spawn(process.execPath, [host], { detached: true, stdio: 'ignore', cwd: HOME }).unref();
+    for (let i = 0; i < 150 && !profiles.has('agent-chrome'); i++) await sleep(100);
+    agentChrome = null;
+    if (!profiles.has('agent-chrome')) throw new Error("the agent's Chrome didn't start; see agent/host.log in BrowserBear's folder");
+  })();
+  return agentChrome;
 }
 
 const opening = new Map(); // what was asked for -> the profile it's opening
@@ -1170,7 +1185,7 @@ const commands = {
 
   async open({ profile, url, thread }) {
     const p = await findProfile(profile);
-    const tab = remember(p.instance, await call(p, 'open', { url }, 40_000));
+    const tab = remember(p.instance, await call(p, 'open', { url, thread }, 40_000));
     marks.used(tab.tabId, thread, `opening ${hostOf(url)}`);
     bearTabs.add(tab.tabId);
     sent(tab.tabId, url);
@@ -1385,7 +1400,9 @@ const commands = {
     marks.handedOff(tabId, thread);
     // It's the user's now: no more pulling it forward for real clicks.
     bearTabs.delete(tabId);
-    const handed = `tab ${tabId} is in front of the user, in their own Chrome window: ${t.title} <${t.url}>`;
+    const handed = p.instance === 'agent-chrome'
+      ? `tab ${tabId} is in front of the user, in this thread's Browser panel in Threadbear: ${t.title} <${t.url}>`
+      : `tab ${tabId} is in front of the user, in their own Chrome window: ${t.title} <${t.url}>`;
     if (wait) return { tabId, message: `${handed}\nWaiting for them to finish; they don't need to reply. A link to the same page as well would open a second tab.` };
     return `${handed}\nSay so when you ask them; a link to the same page as well would open a second tab. To carry on by yourself when they've finished, without them replying: browserbear handoff ${tabId} --wait`;
   },
@@ -1422,6 +1439,12 @@ const commands = {
       text: seen.text,
       doneClicked: marks.doneClicked(tab),
     };
+  },
+
+  // The Done button in Threadbear's Browser panel: the agent's Chrome has no pill.
+  async markDone({ tab }) {
+    marks.clickedDone(tab);
+    return true;
   },
 
   async handoffFinished({ tab }) {
@@ -1534,7 +1557,7 @@ const server = net.createServer((conn) => {
         const old = profiles.get(msg.instance);
         // Same profile reconnecting: keep pending calls' bookkeeping fresh.
         if (old && old.conn !== conn) old.conn.destroy();
-        profile = { instance: msg.instance, email: msg.email, name: known.name || menuNames.get(msg.email), menuName: menuNames.get(msg.email), dir: known.dir, conn, pending: new Map() };
+        profile = { instance: msg.instance, email: msg.email, name: msg.name || known.name || menuNames.get(msg.email), menuName: menuNames.get(msg.email), dir: known.dir, conn, pending: new Map() };
         profiles.set(msg.instance, profile);
         log('hello from', describe(profile), msg.version);
         marks.resend();

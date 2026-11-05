@@ -67,6 +67,27 @@ browserbear CLI (or Threadbear)
 - `key Shift+Enter` adds a line break in rich editors, and `type` keeps the newlines in
   its text. Neither sends a Discord message; only `Enter` or `--submit` do.
 
+## The agent's own Chrome
+
+`--profile agent` works in a Chrome of the agent's own instead of one of your
+profiles, with no extension (`agent/agent-host.mjs`, started when it's first asked for).
+It's real Google Chrome with its own folder (`agent/chrome-profile` in BrowserBear's
+folder), on a debugging port on this Mac only, and it stands in for the extension, so every
+command above works there. Each page gets a window of its own, parked in a corner of a
+screen where about 40 points of it show. Threadbear's Browser panel draws the thread's pages and
+sends your mouse and keys to them, and `handoff` opens that panel, so nothing comes to the front.
+You sign in once per account, in the panel, and those sign-ins stay in that folder.
+
+Tried on 5 Nov 2026: Google's sign-in takes this, with scripted input and the port
+open. It rejects CEF and headless Chrome with "This browser or app may not be secure".
+Chrome stops drawing a minimised window, a hidden app and a background tab (0 frames
+a second, 5 s for a mouse event), hence a window per page; parked, a page streams at 60
+frames a second with about 33 ms from a click to the frame showing it.
+
+Not yet: `download`, and frames from other origins in `probe`. Any program on this Mac can reach
+the debugging port, as it can reach BrowserBear's socket, so only sign this Chrome in to
+what you'd let your agents use. It leaves a second Chrome icon in the Dock and in ⌘-Tab.
+
 ## Install (for now)
 
 ```sh
