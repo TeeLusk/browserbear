@@ -187,9 +187,10 @@ where the tab ended up. If a page's address won't change, or a checkout has seve
 steps, the agent says what finished looks like: `--until-url '*console.cloud.google.com/*'`
 or `--until-text "Payment received"`. Exits 0 when you've finished (including if you
 drag the tab back to BrowserBear's window), 2 if you closed the tab and 124 at the
-timeout (`--timeout <seconds>`, 20 minutes by default). It watches through the tab's
-address and a yes-or-no question to the page, never the debugger, which would put
-Chrome's debugging bar up and clear your password manager's menu while you type.
+timeout (`--timeout <seconds>`, 20 minutes by default). The wait watches the tab's
+address and a yes-or-no question to the page, without attaching a debugger just
+to monitor it. The Browser panel uses BrowserBear's debugger connection for its
+picture and input; its window button pauses that connection for native Chrome UI.
 
 Every tab an agent uses is marked, so you can tell it from yours. The tab's
 title starts with 🐻 and the thread's name, its icon gets a dot (green while

@@ -1603,8 +1603,8 @@ const commands = {
     return `tab ${tab} is at the front of BrowserBear's window, which the user may not be looking at. To have them do something in it: browserbear handoff ${tab} --wait`;
   },
 
-  // Gives a tab to the user: an agent's tab moves from BrowserBear's window
-  // into theirs, and either way it comes to the front and Chrome is focused.
+  // Gives a tab to the user in Threadbear's Browser panel. Chrome's own
+  // window is the fallback when the app or this page cannot use the panel.
   // Given a URL rather than an id, it finds the agent tab already on that
   // page (Threadbear does this for the link buttons on an agent's asks, so
   // you don't get a second tab of the same page).
