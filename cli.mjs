@@ -33,13 +33,14 @@ const USAGE = `browserbear: let agents use your real Chrome profiles
   browserbear dialog <tab> accept|dismiss [text]
   browserbear show <tab>                        bring a tab forward in its window (real clicks need it)
   browserbear handoff <tab|url>                 before asking the user to do something in a tab (sign in,
-                                                pay, approve): moves it from BrowserBear's window into theirs
-                                                and focuses it. A URL finds the agent tab on that page.
+                                                pay, approve): opens this thread's Browser panel in Threadbear,
+                                                now or when they next open the thread. Chrome's own window
+                                                is the fallback. A URL finds the agent tab on that page.
   browserbear handoff <tab|url> --wait [--until-url <glob>] [--until-text <text>] [--timeout <seconds>]
                                                 the same, then waits until they've finished and prints where the
                                                 tab ended up, so they needn't reply "done". Run it as a background
                                                 task. Finished means the tab has left that page and settled on one
-                                                that isn't a sign-in, or they clicked Done on the tab's bar, or
+                                                that isn't a sign-in, or they clicked Done in the panel or tab, or
                                                 moved it back to BrowserBear's window. For a page whose address
                                                 won't change, or a checkout with several steps, say what finished
                                                 looks like: --until-url (* is a wildcard) or --until-text.

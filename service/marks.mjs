@@ -9,10 +9,7 @@
 // thread is archived. Names and states come from Threadbear's `tb list`;
 // without Threadbear the tab just says "agent" and clears after two quiet
 // minutes.
-import { execFile } from 'node:child_process';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { tbPath, run } from './threadbear.mjs';
 
 // Env vars so tests needn't wait.
 const WORKING_MS = Number(process.env.BROWSERBEAR_WORKING_MS) || 12_000;
@@ -23,22 +20,6 @@ const WAIT_SEEN_MS = 10_000;
 // The green "Thanks" before the marks come off. The pill's own fade (drawMark
 // in extension/background.js) finishes just before this.
 const THANKS_MS = Number(process.env.BROWSERBEAR_THANKS_MS) || 3_000;
-
-function tbPath() {
-  if ('BROWSERBEAR_TB' in process.env) return process.env.BROWSERBEAR_TB || null;
-  const current = path.join(os.homedir(), 'Library', 'Application Support', 'Threadbear', 'runner', 'current', 'bin', 'tb');
-  return fs.existsSync(current) ? current : null;
-}
-
-// Threadbear's tb starts with `#!/usr/bin/env node`, and Chrome starts this
-// service with no node on its PATH, so it runs on this service's own Node.
-// (A shell script, like the tests' fake, runs as itself.)
-const run = (file, args) =>
-  new Promise((resolve) => {
-    const node = fs.readFileSync(file, 'utf8').startsWith('#!/usr/bin/env node');
-    const [cmd, argv] = node ? [process.execPath, [file, ...args]] : [file, args];
-    execFile(cmd, argv, { timeout: 15_000 }, (e, out) => resolve(e ? null : out));
-  });
 
 // Short enough to leave room for the page's own title; no "·", which
 // separates the name from the title.

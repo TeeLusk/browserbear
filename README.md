@@ -113,6 +113,15 @@ can pass it. Extension 0.3.6 also preserves Chrome's exact opener tab ID, so pop
 join the correct thread. Older extensions open new windows in Chrome; the
 panel says so. No hostname or URL matching is used to assign a popup.
 
+`browserbear handoff <tab> --wait` asks Threadbear to show this thread's Browser
+panel, even when it was closed. It opens immediately when the user is looking
+at the thread, or when they next open it, with Your turn and Done. It does not
+switch their selected thread. Ordinary `open` and `snap` leave the panel alone.
+The wait finishes on Done or when the page settles after the requested step.
+Without a connected Mac app that supports this handoff, or when the exact tab
+cannot be displayed, handoff uses Chrome's own window. Passkeys and other native
+Chrome UI remain available through the panel's window button.
+
 ## Install (for now)
 
 ```sh
@@ -144,15 +153,15 @@ browserbear type 1234 e7 "Hello" --submit
 browserbear upload 1234 e12 ~/talk.mp3         # e12 can be the "Choose files" button
 browserbear read 1234                          # page text; long pages go to a file
 browserbear shot 1234                          # prints the PNG path
-browserbear handoff 1234                       # your turn: the tab moves into your window
+browserbear handoff 1234                       # your turn: the thread's Browser panel
 browserbear handoff 1234 --wait                # ...and the agent carries on by itself when you've finished
 ```
 
 Agents work in a window of BrowserBear's own, so they never take over the tab
 you're looking at. When an agent needs you to do something in one of its tabs
-(sign in, pay, approve), `handoff` moves that tab into the Chrome window you
-last used and brings it to the front, since BrowserBear's window may be on a
-screen you aren't looking at. `open` and `goto` say so when a page looks like
+(sign in, pay, approve), `handoff` opens the thread's Browser panel in Threadbear.
+When Threadbear isn't available or can't show the page, it moves the tab into
+the Chrome window you last used and brings it to the front. `open` and `goto` say so when a page looks like
 a sign-in. Given a URL, `handoff` finds the agent tab on that page; Threadbear
 does that when you click a link an agent gave you, so you don't end up with
 two tabs of the same sign-in.

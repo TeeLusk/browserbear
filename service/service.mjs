@@ -16,6 +16,7 @@ import { createMarks } from './marks.mjs';
 import { domainOf, looksLikeEmail, menuProfiles, openByEmail, openByMenu } from './chrome.mjs';
 import { RefMap, compact, diff, sameApartFromFocus } from './snapshot.mjs';
 import { createPanel } from './panel.mjs';
+import { tbPath, showBrowserPanel } from './threadbear.mjs';
 
 fs.mkdirSync(LOGS, { recursive: true, mode: 0o700 });
 fs.mkdirSync(OUT, { recursive: true, mode: 0o700 });
@@ -1612,7 +1613,8 @@ const commands = {
     const tabId = typeof tab === 'number' ? tab : await agentTabFor(tab);
     const p = await ownerOf(tabId);
     panel.remember(tabId, thread, p.instance);
-    const inPanel = panel.hasViewer(tabId, p.instance);
+    const requested = thread && tbPath() && await panel.prepareHandoff(tabId, p.instance) ? await showBrowserPanel(thread) : null;
+    const inPanel = Boolean(requested) || panel.hasViewer(tabId, p.instance);
     panel.handedOff(tabId, p.instance, !inPanel);
     if (inPanel || p.instance === 'agent-chrome') setPanelHanded(tabId, true);
     const t = await (inPanel ? tabNow(tabId) : call(p, 'handoff', { tabId })).catch((e) => {
@@ -1625,8 +1627,8 @@ const commands = {
     marks.handedOff(tabId, thread);
     // It's the user's now: no more pulling it forward for real clicks.
     bearTabs.delete(tabId);
-    const handed = p.instance === 'agent-chrome' || inPanel
-      ? `tab ${tabId} is in front of the user, in this thread's Browser panel in Threadbear: ${t.title} <${t.url}>`
+    const handed = inPanel
+      ? `tab ${tabId} is in this thread's Browser panel in Threadbear${requested && !requested.shown ? '; it will open when they next open this thread' : ', in front of the user'}: ${t.title} <${t.url}>`
       : `tab ${tabId} is in front of the user, in their own Chrome window: ${t.title} <${t.url}>`;
     if (wait) return { tabId, message: `${handed}\nWaiting for them to finish; they don't need to reply. A link to the same page as well would open a second tab.` };
     return `${handed}\nSay so when you ask them; a link to the same page as well would open a second tab. To carry on by yourself when they've finished, without them replying: browserbear handoff ${tabId} --wait`;

@@ -298,8 +298,23 @@ export function createPanel({ home, profiles, call, mark, popup = () => {}, dial
   }
 
   return { remember, state,
+    async prepareHandoff(tabId, instance) {
+      const own = ownTab(tabId, instance);
+      const profile = own && profileFor(own);
+      if (!profile || own.inChrome || own.suspended) return false;
+      try {
+        const tab = (await call(profile, 'tabs', {}, 5000)).find(t => t.tabId === tabId);
+        if (!tab || (!tab.agent && !own.consent)) return false;
+        const { targetInfo } = await send(own, 'Target.getTargetInfo');
+        if (!targetInfo?.targetId || (own.targetId && own.targetId !== targetInfo.targetId)) return false;
+        own.targetId = targetInfo.targetId;
+        verified.add(key(instance, tabId));
+        persist();
+        return true;
+      } catch { return false; }
+    },
     hasViewer(tabId, instance) { return [...viewers.values()].some(v => v.tabId === tabId && v.instance === instance && !v.paused && !v.stopped); },
-    handedOff(tabId, instance, inChrome = false) { const t = ownTab(tabId, instance); if (t) { t.handoffs++; t.inChrome = inChrome; persist(); } },
+    handedOff(tabId, instance, inChrome = false) { const t = ownTab(tabId, instance); if (t) { t.handoffs++; t.handoffAt = Date.now(); t.inChrome = inChrome; persist(); } },
     forget(tabId, instance) { tabs.delete(key(instance, tabId)); persist(); for (const v of viewers.values()) if (v.tabId === tabId && v.instance === instance) release(v); },
     event(profile, msg) {
       for (const v of viewers.values()) {
