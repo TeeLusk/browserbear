@@ -50,9 +50,11 @@ browserbear CLI (or Threadbear)
   (a sign-in popup finishing) is reported as that, not as a failure or "(no change)".
 - `type` into a code split across one-character boxes fills the row one character per
   box, leaving out spaces and dashes, and reads it back.
-- `type` reads the field back. If inserted text changed nothing it uses real key
-  presses, as a masked amount field needs, and if the field still hasn't changed, or
-  doesn't end up with the text in it, that's an error, before any `--submit`.
+- `type` reads the field back. If inserted text changed nothing after a couple of
+  seconds it uses real key presses, as a masked amount field needs, and if the field
+  still hasn't changed, doesn't end up with the text in it, or has it in twice, that's
+  an error, before any `--submit`. With `-`, it won't fall back to keys once focus has
+  left the field. A rich editor's text is printed, since the snapshot doesn't show it.
 - `type --replace` puts the text in over a selection as one edit, since a controlled
   field can restore its old value the moment it's emptied. It then reads the field back
   and fails, before any `--submit`, unless it holds exactly that text.

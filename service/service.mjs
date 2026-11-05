@@ -1015,35 +1015,146 @@ const shown = (read) => (read.secret ? "something else (a password field, so it 
 // field can do its own typing from keydown and ignore it (the amount on eToro's
 // order panel stayed empty and type said "(no change)", 2 Nov). So a field that
 // hasn't changed gets real keys, and one that still hasn't is an error, as is one
-// that ends up without the text in it. Runs before any --submit.
+// that ends up without the text in it, or with it in twice. Runs before any --submit.
+//
+// "Hasn't changed" is more than the value staying put, since an editor can show
+// inserted text late (Ordinal's Tiptap captions, 5 Nov: it looked unchanged at
+// the first read, got the keys as well, and ended up with the caption twice). So
+// it waits a while; in a rich editor any change to its DOM counts as taking it;
+// and text typed over a selection of the same text changes nothing anyway. Keys
+// that did go in get the same wait again, so inserted text turning up even later
+// still shows up as a doubled field rather than a success.
 //
 // A field that really does take the text away (a tag field, on a comma) looks the
 // same as one that ignored it, so its text gets typed twice; the note says so.
 // Multi-line text is left alone: a composer can send on a line break and empty.
 async function typeChecked(tabId, node, text) {
   const field = text && !text.includes('\n') ? await pinField(tabId, node).catch(() => null) : null;
-  const before = field && (await readPinned(tabId, field).catch(() => null));
+  const before = field && (await watchField(tabId, field, text).catch(() => null));
   await cdp(tabId, 'Input.insertText', { text });
   await settle();
   if (!before) return ''; // a canvas editor, say: nothing to read back
   // Gone means the page moved on or redrew the field, which isn't a sign of trouble.
-  let after = await readPinned(tabId, field).catch(() => null);
+  const read = () => readPinned(tabId, field).catch(() => null);
+  let after = await read();
   if (!after) return '';
+  // In a rich editor, only the text showing up counts, since a decoration it
+  // redraws changes its innerText too.
+  const unchanged = async () =>
+    before.rich ? times(after.value, text) <= times(before.value, text) && !(await fieldMutated(tabId, field)) : after.value === before.value && !before.noOp;
+  const late = async () => {
+    for (let waited = 0; waited < LATE_INPUT_MS && (await unchanged()); waited += 150) {
+      await sleep(150);
+      after = (await read()) || after;
+    }
+    // The DOM can change between a read and the check on it.
+    after = (await read()) || after;
+  };
+  await late();
   let note = '';
-  if (after.value === before.value) {
+  if (await unchanged()) {
+    // With no ref, the field is whatever had focus. If focus has gone somewhere
+    // else, the text likely went there, and keys would put it in a second place.
+    if (!node && !(await hasFocus(tabId, field))) throw new Error(`type didn't work on tab ${tabId}: the focused field still holds ${shown(before)}, and focus had moved off it, so ${JSON.stringify(text)} may have gone into another field. Nothing else was typed or submitted; snap to see, and type into the field by its ref`);
     if (node) await clickNode(tabId, node);
     await typeKeys(tabId, text);
     await settle();
-    after = (await readPinned(tabId, field).catch(() => null)) || after;
+    after = (await read()) || after;
     if (after.value === before.value) throw new Error(`type didn't work on tab ${tabId}: the field still holds ${before.secret ? 'what it did (a password field, so it isn\'t shown)' : JSON.stringify(before.value)}, so ${JSON.stringify(text)} didn't go in, by inserted text or by real keys. Nothing was submitted. Is it disabled or read-only? snap to see`);
+    // The whole wait, not until the first change: the page reformatting what the
+    // keys typed isn't the inserted text arriving.
+    await sleep(LATE_INPUT_MS);
+    after = (await read()) || after;
     note = '(the page ignored inserted text, so that was real key presses)';
   }
   // One character kept out of several is what a code box does when typeSplit can't
   // see its neighbours (each in a shadow root of its own, say).
   const oneBox = [...after.value].length === 1 && bare(text).length > 1 ? ". If this is a row of one-character boxes, type each character into its own box by its ref" : '';
-  if (!bare(after.value).includes(bare(text))) throw new Error(`type didn't work on tab ${tabId}: the field holds ${shown(after)}, which doesn't have ${JSON.stringify(text)} in it. Nothing was submitted. The page may have cut it short or changed it; snap to see${oneBox}`);
+  if (!norm(text)(after.value).includes(norm(text)(text))) throw new Error(`type didn't work on tab ${tabId}: the field holds ${shown(after)}, which doesn't have ${JSON.stringify(text)} in it. Nothing was submitted. The page may have cut it short or changed it; snap to see${oneBox}`);
+  if (doubled(before.base, after.value, text)) throw new Error(`type went wrong on tab ${tabId}: ${JSON.stringify(text)} went in more than once, and the field now holds ${shown(after)}. Nothing was submitted. If the field should hold just that text, browserbear type ${tabId} ${node ? '<ref>' : '-'} ${JSON.stringify(text)} --replace puts it in over what's there`);
+  // A rich editor's text isn't in the snapshot, so say what it holds now.
+  if (after.rich) note = [note, `(the field now holds ${JSON.stringify(clip(flatten(after.value)))})`].filter(Boolean).join('\n');
   return note;
 }
+
+// How much longer than the settle a field gets to show text before it counts as
+// ignored, and keys get before their result counts.
+const LATE_INPUT_MS = 1500;
+
+// What a field holds before typing, and starts watching a rich editor's DOM for
+// the text arriving. noOp: an input whose selection already holds exactly the text.
+const watchField = (tabId, field, text) =>
+  cdp(tabId, 'Runtime.callFunctionOn', {
+    objectId: field,
+    functionDeclaration: `function (text) {
+      const field = this;
+      if (field.isContentEditable) {
+        field.__browserbearMutated = false;
+        // Only a change that brings the text in counts, not a decoration redrawn.
+        const want = (s) => s.toLowerCase().replace(/[^\\p{L}\\p{N}]/gu, '') || s.replace(/\\s+/g, ' ').trim();
+        const brings = (n) => want(n.textContent || '').includes(want(text));
+        const seen = new MutationObserver((records) => {
+          if (!records.some((r) => (r.type === 'characterData' ? brings(r.target) : [...r.addedNodes].some(brings)))) return;
+          field.__browserbearMutated = true;
+          seen.disconnect();
+        });
+        seen.observe(field, { subtree: true, childList: true, characterData: true });
+        setTimeout(() => seen.disconnect(), 30000);
+      }
+      // base: what's left once the selection goes, which is what one copy goes into.
+      let noOp = false, base = field.value ?? field.innerText;
+      try {
+        if (field.value !== undefined && field.selectionStart !== field.selectionEnd) {
+          noOp = field.value.slice(field.selectionStart, field.selectionEnd) === text;
+          base = field.value.slice(0, field.selectionStart) + field.value.slice(field.selectionEnd);
+        }
+      } catch {}
+      if (field.value === undefined) {
+        const picked = field.ownerDocument.getSelection().toString();
+        if (picked.trim() && picked.replace(/\\s+/g, '') === field.innerText.replace(/\\s+/g, '')) base = '';
+        else if (picked.trim() && field.contains(field.ownerDocument.getSelection().anchorNode)) base = field.innerText.replace(picked, '');
+      }
+      ${READ_FIELD.replace('return {', 'return { noOp, base,')}
+    }`,
+    arguments: [{ value: text }],
+    returnByValue: true,
+  }).then((r) => r.result?.value ?? null);
+
+const fieldMutated = (tabId, field) =>
+  cdp(tabId, 'Runtime.callFunctionOn', { objectId: field, functionDeclaration: 'function () { return this.__browserbearMutated === true; }', returnByValue: true }).then((r) => r.result?.value === true, () => false);
+
+// Letters and digits, or for text with none (punctuation), the text itself.
+const norm = (text) => (bare(text) ? bare : flatten);
+const times = (value, text) => {
+  const n = norm(text);
+  return n(value).split(n(text)).length - 1;
+};
+// In twice: two more copies than before, and more growth than one copy makes, so
+// typing "aba" into "ab|ba" (two copies, overlapping) isn't taken for a double.
+// Or grown by exactly two copies' worth with every character of it gained twice
+// over, for a late copy arriving in the middle of the keys ("aabcbc"), though not
+// a completion ("san" -> "san francisco").
+const doubled = (before, after, text) => {
+  const n = norm(text);
+  const [b, a, t] = [n(before), n(after), n(text)];
+  if (times(after, text) - times(before, text) > 1 && a.length - b.length > t.length) return true;
+  const count = (s) => [...s].reduce((m, c) => m.set(c, (m.get(c) || 0) + 1), new Map());
+  const [cb, ca, ct] = [count(b), count(a), count(t)];
+  return t.length > 0 && a.length - b.length === 2 * t.length && [...ct].every(([c, k]) => (ca.get(c) || 0) - (cb.get(c) || 0) >= 2 * k);
+};
+const clip = (s) => (s.length > 300 ? `${s.slice(0, 300)}…` : s);
+
+// Whether focus is still in this field, through shadow roots and iframes.
+const hasFocus = (tabId, field) =>
+  cdp(tabId, 'Runtime.callFunctionOn', {
+    objectId: field,
+    functionDeclaration: `function () {
+      let f = document.activeElement;
+      while (f?.shadowRoot?.activeElement || f?.contentDocument?.activeElement) f = f.shadowRoot?.activeElement || f.contentDocument.activeElement;
+      return !!f && (f === this || this.contains(f));
+    }`,
+    returnByValue: true,
+  }).then((r) => r.result?.value === true, () => true);
 
 // Rich editors wrap text in their own paragraphs, so only the words count there.
 const flatten = (s) => s.replace(/\s+/g, ' ').trim();
@@ -1063,7 +1174,13 @@ async function replaceText(tabId, node, text) {
   if (await onField(tabId, node, SELECT_FIELD).catch(() => null)) {
     await insert();
     await settle();
-    const read = await onField(tabId, node, READ_FIELD);
+    // Given a moment, as in typeChecked: an editor that shows it late would
+    // otherwise get it again below, and end up with it twice.
+    let read = await onField(tabId, node, READ_FIELD);
+    for (let waited = 0; read && !holds(read, text) && waited < LATE_INPUT_MS; waited += 150) {
+      await sleep(150);
+      read = await onField(tabId, node, READ_FIELD);
+    }
     if (read && holds(read, text)) return '';
   }
   if (node) await clickNode(tabId, node);
@@ -1082,6 +1199,12 @@ async function replaceText(tabId, node, text) {
   }
   // A canvas editor (Google Docs) has no field to read back.
   if (!read) return "(this editor can't be read back, so check below that the text was replaced)";
+  // Still holding it a moment later: the first attempt's text turning up late
+  // would land on top of this one.
+  if (holds(read, text)) {
+    await sleep(LATE_INPUT_MS);
+    read = (await onField(tabId, node, READ_FIELD)) || read;
+  }
   if (holds(read, text)) return '';
   throw new Error(`--replace didn't work on tab ${tabId}: the field holds ${shown(read)}, not ${JSON.stringify(text)}. Nothing was submitted. The page may have changed or reformatted it; snap to see`);
 }
