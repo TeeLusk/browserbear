@@ -19,13 +19,14 @@ else if (args[0] === 'list') console.log(JSON.stringify([{id:'thread-one',title:
 else console.log('');
 `);
   let focused = 0;
+  let probes = 0;
   const tab = { tabId: 8, url: 'https://example.com/check', title: 'Check', agent: true, bear: true, status: 'complete' };
   const bear = await startBear(t, async ({ op, args }) => {
     if (op === 'tabs') return [tab];
     if (op === 'open') return tab;
     if (op === 'handoff') { focused++; return tab; }
     if (op === 'mark') return true;
-    if (op === 'probe') return {};
+    if (op === 'probe') { probes++; return {}; }
     if (op === 'cdp' && args.method === 'Target.getTargetInfo') {
       if (restricted) throw new Error('Cannot attach to this target');
       return { targetInfo: { targetId: 'target-8' } };
@@ -39,7 +40,7 @@ else console.log('');
     conn.on('data', d => { buffer += d; if (buffer.includes('\n')) { conn.end(); const m = JSON.parse(buffer.split('\n')[0]); m.ok ? resolve(m.result) : reject(new Error(m.error)); } });
     conn.on('error', reject);
   });
-  return { ...bear, rpc, focused: () => focused, requests: () => fs.existsSync(requests) ? fs.readFileSync(requests, 'utf8').trim().split('\n').map(JSON.parse) : [] };
+  return { ...bear, rpc, tab, probes: () => probes, focused: () => focused, requests: () => fs.existsSync(requests) ? fs.readFileSync(requests, 'utf8').trim().split('\n').map(JSON.parse) : [] };
 }
 
 test('handoff queues the Browser panel without an existing viewer or a Chrome focus change', async t => {
@@ -82,5 +83,15 @@ test('a panel handoff wait completes on Done while the tab stays in BrowserBearâ
   }
   await b.rpc('markDone', { tab: 8 });
   assert.match(await waiting, /clicked Done/);
+  assert.equal(b.focused(), 0);
+});
+
+test('a panel handoff wait completes when the page reaches its settled destination', async t => {
+  const b = await setup(t);
+  const waiting = b.browserbear('handoff', '8', '--wait', '--timeout', '20');
+  for (let i = 0; i < 100 && !b.probes(); i++) await new Promise(r => setTimeout(r, 20));
+  b.tab.url = 'https://example.com/finished';
+  b.tab.title = 'Finished';
+  assert.match(await waiting, /user has finished.*Finished/);
   assert.equal(b.focused(), 0);
 });
