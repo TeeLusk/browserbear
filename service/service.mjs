@@ -32,6 +32,24 @@ const tabOwner = new Map(); // tabId -> instance
 const bearTabs = new Set(); // tabs BrowserBear opened itself (in its own window)
 const tabState = new Map(); // tabId -> { refs: RefMap, last: string[] | null, dialog }
 const sentTo = new Map(); // tabId -> pages an agent opened or sent it to
+// The user's own tabs an agent has been let into, with claim or --user-tab.
+const claimed = new Set();
+// Agent tabs handed to the user in Threadbear's Browser panel (and every
+// handoff in the agent's own Chrome, which is drawn there). They stay in
+// BrowserBear's window, so the window alone doesn't say they're the user's now.
+// On disk, so a service restart mid sign-in doesn't make them closable again.
+const PANEL_HANDED = path.join(HOME, 'panel-handed.json');
+const panelHanded = new Set((() => {
+  try { return JSON.parse(fs.readFileSync(PANEL_HANDED, 'utf8')); } catch { return []; }
+})());
+const savePanelHanded = () => {
+  try { fs.writeFileSync(PANEL_HANDED, JSON.stringify([...panelHanded]), { mode: 0o600 }); } catch (e) { log('cannot save panel handoffs:', e.message); }
+};
+const setPanelHanded = (tabId, on) => {
+  if (panelHanded.has(tabId) === on) return;
+  on ? panelHanded.add(tabId) : panelHanded.delete(tabId);
+  savePanelHanded();
+};
 let nextId = 1;
 
 // Chrome's own list of profiles, so "Work" or "Profile 2" or the email
@@ -242,6 +260,58 @@ async function ownerOf(tabId) {
   const found = profiles.get(tabOwner.get(tabId));
   if (!found) throw new Error(`no tab ${tabId} in any connected profile (browserbear tabs lists them)`);
   return found;
+}
+
+// Whose a tab is: 'agent' when an agent opened it and still has it (it's in
+// BrowserBear's window, or the agent's own Chrome), 'handed' when an agent
+// opened it and handed it to the user, 'claimed' for one of the user's own an
+// agent has been let into, 'user' for the rest. null when the extension is too
+// old to say. On 5 Nov an agent grepped `tabs` for the page it had just opened,
+// got Mike's own tab on the same page (he was replying to his launch post in
+// it), and closed it. The extension already knew which was which.
+async function whose(tabId) {
+  const p = await ownerOf(tabId);
+  const tabs = await call(p, 'tabs');
+  const t = tabs.find((x) => x.tabId === tabId);
+  if (!t) throw Object.assign(new Error(closedMessage(tabId)), { closed: true });
+  if (t.agent === undefined) return { who: bearTabs.has(tabId) ? 'agent' : null, t, p };
+  if (t.bear !== false && !panelHanded.has(tabId)) return { who: 'agent', t, p };
+  if (t.agent) return { who: 'handed', t, p };
+  if (claimed.has(tabId)) return { who: 'claimed', t, p };
+  // A popup the Browser panel saw an agent's page open.
+  if (bearTabs.has(tabId)) return { who: 'agent', t, p };
+  // A popup an agent's page opened (a Google sign-in, say) is in a window of
+  // its own, not BrowserBear's, but it's still the agent's to finish.
+  for (let at = t, i = 0; at?.openerTabId != null && i < 5; i++) {
+    at = tabs.find((x) => x.tabId === at.openerTabId);
+    if (at && at.bear && !panelHanded.has(at.tabId)) return { who: 'agent', t, p };
+  }
+  return { who: 'user', t, p };
+}
+
+// Commands that change a page. Looking (snap, read, shot, eval, show) stays
+// open on any tab, unmarked on the user's own; these need the tab to be an
+// agent's, or the user's tab to have been lent with claim or --user-tab.
+const ACTS = new Set(['click', 'type', 'key', 'goto', 'upload', 'dialog', 'cdp']);
+const NOT_YOURS = "If you meant a tab you opened, use the id browserbear open printed (open --id prints only that), not a match from browserbear tabs.";
+
+function refuseUserTab(cmd, tabId, { who, t }) {
+  const page = `"${t.title.slice(0, 60)}" <${t.url.slice(0, 100)}>`;
+  if (cmd === 'close') {
+    const whose = who === 'handed'
+      ? "one an agent handed to the user, so it's theirs now"
+      : who === null
+        ? "one BrowserBear can't place (this profile's extension is too old to say who opened it), so it counts as the user's"
+        : "the user's own, not one an agent opened";
+    return new Error(
+      `tab ${tabId} is ${whose} (${page}), so BrowserBear won't close it: they may be in the middle of something there. ${NOT_YOURS} ` +
+        `If the user asked you to close this one: browserbear close ${tabId} --user-tab`,
+    );
+  }
+  return new Error(
+    `tab ${tabId} is the user's own (${page}), not one an agent opened, so BrowserBear won't ${cmd} in it. snap, read, shot and eval can still look at it. ${NOT_YOURS} ` +
+      `If the user wants you working in this tab: browserbear claim ${tabId}, or add --user-tab`,
+  );
 }
 
 const closedMessage = (tabId) => `tab ${tabId} has closed, so there's nothing left to act on. browserbear tabs lists what's open`;
@@ -1322,7 +1392,9 @@ const commands = {
       out.push(`${describe(p)}:`);
       for (const t of await call(p, 'tabs')) {
         remember(p.instance, t);
-        out.push(`  ${t.tabId}${t.active ? '*' : ' '} ${t.title.slice(0, 60)} <${t.url.slice(0, 100)}>${marks.label(t.tabId)}`);
+        // So an agent can tell its own tab from the user's on the same page.
+        const user = t.agent === false && !claimed.has(t.tabId) ? " (the user's)" : t.agent && t.bear === false ? ' (handed to the user)' : '';
+        out.push(`  ${t.tabId}${t.active ? '*' : ' '} ${t.title.slice(0, 60)} <${t.url.slice(0, 100)}>${user}${marks.label(t.tabId)}`);
       }
     }
     return out.join('\n');
@@ -1352,19 +1424,21 @@ const commands = {
   },
 
   // Find one of Mike's own tabs by a bit of its URL or title.
+  // Or by its id, to take on a tab the user asked an agent to work in.
   async claim({ match, profile, thread }) {
     const list = profile ? [await findProfile(profile)] : [...profiles.values()];
     const hits = [];
     for (const p of list) {
       for (const t of await call(p, 'tabs')) {
         remember(p.instance, t);
-        if (`${t.url} ${t.title}`.toLowerCase().includes(match.toLowerCase())) hits.push({ p, t });
+        if (String(t.tabId) === match.trim() || `${t.url} ${t.title}`.toLowerCase().includes(match.toLowerCase())) hits.push({ p, t });
       }
     }
     if (!hits.length) throw new Error(`no open tab matches "${match}"`);
     if (hits.length > 1) {
       return `several tabs match; pick one by id:\n${hits.map(({ p, t }) => `  ${t.tabId} [${describe(p)}] ${t.title.slice(0, 60)} <${t.url.slice(0, 100)}>`).join('\n')}`;
     }
+    claimed.add(hits[0].t.tabId);
     marks.used(hits[0].t.tabId, thread, 'looking at the page');
     panel.remember(hits[0].t.tabId, thread, hits[0].p.instance);
     return snapshot(hits[0].t.tabId);
@@ -1540,6 +1614,7 @@ const commands = {
     panel.remember(tabId, thread, p.instance);
     const inPanel = panel.hasViewer(tabId, p.instance);
     panel.handedOff(tabId, p.instance, !inPanel);
+    if (inPanel || p.instance === 'agent-chrome') setPanelHanded(tabId, true);
     const t = await (inPanel ? tabNow(tabId) : call(p, 'handoff', { tabId })).catch((e) => {
       if (/unknown op/.test(e.message)) throw new Error(`${describe(p)} has an older BrowserBear extension; browserbear reload, then try again`);
       // You closed the tab an agent had sent there: forget it, look again.
@@ -1599,6 +1674,7 @@ const commands = {
 
   async handoffFinished({ tab }) {
     marks.finished(tab);
+    setPanelHanded(tab, false); // back in BrowserBear's window, it's the agent's again
     return true;
   },
 
@@ -1626,8 +1702,19 @@ const commands = {
     tabOwner.delete(tab);
     bearTabs.delete(tab);
     sentTo.delete(tab);
+    claimed.delete(tab);
+    setPanelHanded(tab, false);
     panel.forget(tab, p.instance);
     return `closed tab ${tab}`;
+  },
+
+  // Takes BrowserBear's marks off a tab and lets go of it, as the pill's ✕
+  // does: for one of the user's tabs an agent has finished with.
+  async release({ tab }) {
+    await ownerOf(tab);
+    claimed.delete(tab);
+    await marks.release(tab);
+    return `let go of tab ${tab}; its marks are off`;
   },
 };
 
@@ -1652,7 +1739,11 @@ function onHostMessage(profile, msg) {
     // The buttons on the pill in an agent's tab.
     if (msg.event === 'mark' && msg.action === 'open') marks.open(msg.tabId);
     if (msg.event === 'mark' && msg.action === 'stop') marks.stop(msg.tabId);
-    if (msg.event === 'mark' && msg.action === 'release') marks.release(msg.tabId);
+    // The pill's ✕: leave this tab alone, which also takes back a claim on it.
+    if (msg.event === 'mark' && msg.action === 'release') {
+      claimed.delete(msg.tabId);
+      marks.release(msg.tabId);
+    }
     if (msg.event === 'mark' && msg.action === 'done') marks.clickedDone(msg.tabId);
     return;
   }
@@ -1690,11 +1781,24 @@ async function onClientMessage(conn, msg) {
     const args = { ...(msg.args || {}), thread: msg.thread };
     // Left as text when it isn't a number: handoff also takes a URL.
     if (/^\d+$/.test(String(args.tab))) args.tab = Number(args.tab);
-    if (typeof args.tab === 'number' && USES[msg.cmd]) {
-      using = args.tab;
-      const profile = await ownerOf(using);
-      panel.remember(using, msg.thread, profile.instance);
-      marks.begin(using, msg.thread, USES[msg.cmd](args));
+    if (typeof args.tab === 'number' && (USES[msg.cmd] || msg.cmd === 'close')) {
+      const owner = await whose(args.tab);
+      // Only a tab known to be an agent's closes without asking. Commands that
+      // change a page still go through on an extension too old to say whose a
+      // tab is (before 0.3.5), as they always have.
+      if (msg.cmd === 'close' && owner.who !== 'agent' && !args.userTab) throw refuseUserTab('close', args.tab, owner);
+      if (ACTS.has(msg.cmd) && owner.who === 'user') {
+        if (!args.userTab) throw refuseUserTab(msg.cmd, args.tab, owner);
+        claimed.add(args.tab);
+        owner.who = 'claimed';
+      }
+      // Only looking at one of the user's tabs doesn't mark it: an eval or a
+      // show left Mike's own X and LinkedIn tabs titled with a thread's name.
+      if (USES[msg.cmd] && owner.who !== 'user') {
+        using = args.tab;
+        panel.remember(using, msg.thread, owner.p.instance);
+        marks.begin(using, msg.thread, USES[msg.cmd](args));
+      }
     }
     conn.write(line({ id: msg.id, ok: true, result: await fn(args) }));
   } catch (e) {

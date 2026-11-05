@@ -12,9 +12,10 @@ import { createHandoffWatch } from './service/handoff-wait.mjs';
 const USAGE = `browserbear: let agents use your real Chrome profiles
 
   browserbear profiles                          Chrome profiles, and which have BrowserBear connected
-  browserbear tabs [--profile p]                open tabs, with ids
-  browserbear open <url> --profile p
-  browserbear claim <text> [--profile p]        find one of your open tabs by URL or title
+  browserbear tabs [--profile p]                open tabs, with ids. The user's own say (the user's)
+  browserbear open <url> --profile p [--id]     --id: print only the new tab's id. Use that id from then on,
+                                                never a grep of tabs: the user may have the same page open
+  browserbear claim <text|tab> [--profile p]    find one of the user's open tabs by URL, title or id, to work in
   browserbear snap <tab> [--full]               what's on the page (a diff after the first look)
   browserbear click <tab> <ref> [--script]       --script: a script click, for pages that ignore real ones
                                                 (a link that ignores a real click gets one by itself)
@@ -44,7 +45,12 @@ const USAGE = `browserbear: let agents use your real Chrome profiles
                                                 looks like: --until-url (* is a wildcard) or --until-text.
                                                 Exits 0 when finished, 2 if they closed the tab, 124 at the timeout
                                                 (default 20 minutes; run it again to keep waiting).
-  browserbear close <tab>
+  browserbear close <tab> [--user-tab]          only closes a tab an agent opened, unless --user-tab
+  browserbear release <tab>                     take BrowserBear's marks off a tab and let go of it
+
+The user's own tabs (not opened by an agent, or handed to them) can be looked at with snap, read, shot
+and eval. click, type, key, goto, upload and dialog need claim first, or --user-tab, and only when the
+user asked for work in that tab. close refuses them unless --user-tab, so only when they asked for it.
   browserbear reload [--profile p]              reload the extension after changing it (all profiles by default)
   browserbear status
 
@@ -98,6 +104,7 @@ function argsFor(cmd, pos, flags) {
     case 'focus':
     case 'handoff':
     case 'close':
+    case 'release':
       return { tab: a };
     case 'shot':
       return { tab: a, file: b && path.resolve(b) };
@@ -196,6 +203,12 @@ async function handoffAndWait({ tab, untilUrl, untilText, timeoutS }) {
 // makes Node print "Detected unsettled top-level await" under every error.
 const { cmd, pos, flags } = parse(process.argv.slice(2));
 const args = cmd && argsFor(cmd, pos, flags);
+// Lets an agent into one of the user's own tabs (see USAGE).
+if (args && flags['user-tab']) args.userTab = true;
+// `open --id`: just the new tab's id, so `tab=$(browserbear open ... --id)` gets
+// the right one. The service always starts with "opened tab <id>", even when
+// the page went wrong after it opened.
+const openedId = (text) => /^opened tab (\d+)/.exec(text)?.[1];
 if (!args) {
   console.log(USAGE);
   process.exitCode = cmd && cmd !== 'help' ? 1 : 0;
@@ -210,9 +223,11 @@ if (!args) {
       // Which Threadbear thread is asking, so the tabs it uses carry its name
       // (service/marks.mjs). Unset outside Threadbear: the tab says "agent".
       const result = await request({ id: 1, cmd, args, thread });
-      console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
+      if (cmd === 'open' && flags.id) console.log(openedId(result));
+      else console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
     }
   } catch (e) {
+    if (cmd === 'open' && flags.id && openedId(e.message)) console.log(openedId(e.message));
     console.error(`browserbear: ${e.message}`);
     process.exitCode = 1;
   }

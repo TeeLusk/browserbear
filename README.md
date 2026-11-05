@@ -157,6 +157,17 @@ a sign-in. Given a URL, `handoff` finds the agent tab on that page; Threadbear
 does that when you click a link an agent gave you, so you don't end up with
 two tabs of the same sign-in.
 
+Your own tabs stay yours. An agent can look at one (`snap`, `read`, `shot`,
+`eval`, `show`) without it getting marked, but `click`, `type`, `key`, `goto`,
+`upload`, `dialog` and `cdp` refuse a tab no agent opened until it's lent with
+`claim` (by address, title or id) or `--user-tab`. `close` refuses your tabs,
+and agent tabs that were handed to you, unless it's given `--user-tab`, since you
+may be halfway through something there. `tabs` marks yours `(the user's)`, and
+`open --id` prints just the new tab's id, so an agent never has to find its tab
+again by grepping for its address. Grepping is how one closed Mike's X tab while he
+was replying to his launch post, since he had the same page open. `release` takes
+the marks off a tab and lets go of it.
+
 With `--wait`, you don't have to go back and tell the agent you've finished. It
 waits (run it as a background task) until the tab has left the page it was handed
 over on and settled somewhere that isn't another sign-in step, so a password page
