@@ -1627,8 +1627,8 @@ const commands = {
     marks.handedOff(tabId, thread);
     // It's the user's now: no more pulling it forward for real clicks.
     bearTabs.delete(tabId);
-    const handed = inPanel
-      ? `tab ${tabId} is in this thread's Browser panel in Threadbear${requested && !requested.shown ? '; it will open when they next open this thread' : ', in front of the user'}: ${t.title} <${t.url}>`
+    const handed = inPanel || p.instance === 'agent-chrome'
+      ? `tab ${tabId} is in this thread's Browser panel in Threadbear${requested?.shown || panel.hasViewer(tabId, p.instance) ? ', in front of the user' : '; it will open when they next open this thread'}: ${t.title} <${t.url}>`
       : `tab ${tabId} is in front of the user, in their own Chrome window: ${t.title} <${t.url}>`;
     if (wait) return { tabId, message: `${handed}\nWaiting for them to finish; they don't need to reply. A link to the same page as well would open a second tab.` };
     return `${handed}\nSay so when you ask them; a link to the same page as well would open a second tab. To carry on by yourself when they've finished, without them replying: browserbear handoff ${tabId} --wait`;

@@ -66,6 +66,13 @@ for (const options of [{ available: false }, { restricted: true }]) {
   });
 }
 
+test('legacy agent Chrome still names its Browser panel when the app is unavailable', async t => {
+  const b = await setup(t, { available: false });
+  b.fromExtension({ type: 'hello', instance: 'agent-chrome', email: 'agent', version: 'test' });
+  await assert.rejects(b.rpc('open', { url: 'https://example.com/check', profile: 'agent-chrome' }), /couldn't look at it yet/);
+  assert.match(await b.browserbear('handoff', '8'), /this thread's Browser panel/);
+});
+
 test('a panel handoff wait completes on Done while the tab stays in BrowserBear’s window', async t => {
   const b = await setup(t);
   const waiting = b.browserbear('handoff', '8', '--wait', '--timeout', '20');
