@@ -88,6 +88,29 @@ Not yet: `download`, and frames from other origins in `probe`. Any program on th
 the debugging port, as it can reach BrowserBear's socket, so only sign this Chrome in to
 what you'd let your agents use. It leaves a second Chrome icon in the Dock and in ⌘-Tab.
 
+## Threadbear's Browser panel with existing Chrome profiles
+
+The panel can also use this extension's existing Chrome profile and sign-ins,
+through the service's private Unix socket. The profile's name and email stay
+visible, and the profile menu opens a page in the exact connected profile selected.
+No cookie or credential import is involved, and existing Store extensions work.
+
+The service tracks pages used by threads in `panel-tabs.json` (0600), storing
+profile/tab/target identities and cached titles, without full URLs or credentials.
+A stream checks the thread's ownership and Chrome's target identity, and only
+one panel controls a tab. A user-owned tab needs an explicit Show this tab here
+before the panel changes its viewport. Closing the panel restores its normal size.
+Frames remain in memory on this Mac.
+
+The native-window button pauses capture for Chrome's passkeys, password managers
+and other native UI. Returning to the panel is explicit; Chrome's debugger Stop
+is respected until Reconnect. Existing-profile frames use sequential screenshots
+with backpressure rather than the separate agent Chrome's 60 fps screencast.
+Viewport changes wait for a capture to finish, while input and dialog answers
+can pass it. Extension 0.3.6 also preserves Chrome's exact opener tab ID, so popups
+join the correct thread. Older extensions open new windows in Chrome; the
+panel says so. No hostname or URL matching is used to assign a popup.
+
 ## Install (for now)
 
 ```sh

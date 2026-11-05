@@ -45,7 +45,7 @@ const USAGE = `browserbear: let agents use your real Chrome profiles
                                                 Exits 0 when finished, 2 if they closed the tab, 124 at the timeout
                                                 (default 20 minutes; run it again to keep waiting).
   browserbear close <tab>
-  browserbear reload                            reload the extension everywhere after changing it
+  browserbear reload [--profile p]              reload the extension after changing it (all profiles by default)
   browserbear status
 
 A profile is its whole Chrome name, email or folder, in any case: "Work", "you@company.com", "Default",
@@ -76,7 +76,7 @@ function argsFor(cmd, pos, flags) {
     case 'profiles':
     case 'status':
     case 'reload':
-      return {};
+      return p;
     case 'tabs':
       return p;
     case 'open':

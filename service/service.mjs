@@ -15,6 +15,7 @@ import { HOME, LOGS, OUT, SOCKET, line, lineReader } from './wire.mjs';
 import { createMarks } from './marks.mjs';
 import { domainOf, looksLikeEmail, menuProfiles, openByEmail, openByMenu } from './chrome.mjs';
 import { RefMap, compact, diff, sameApartFromFocus } from './snapshot.mjs';
+import { createPanel } from './panel.mjs';
 
 fs.mkdirSync(LOGS, { recursive: true, mode: 0o700 });
 fs.mkdirSync(OUT, { recursive: true, mode: 0o700 });
@@ -110,6 +111,7 @@ const isCalled = (p, w) => [p.name, p.menuName, p.email, p.dir, printed(p)].some
 const nearly = (names, w) => names.filter((n) => n?.toLowerCase().includes(w));
 
 async function findProfile(want) {
+  if (profiles.has(want)) return profiles.get(want);
   // The agent's own Chrome: started when it's first asked for (agent/agent-host.mjs).
   if (String(want).toLowerCase() === 'agent' && !profiles.has('agent-chrome')) await startAgentChrome();
   const all = [...profiles.values()];
@@ -257,6 +259,18 @@ const marks = createMarks({
   log,
 });
 
+const panel = createPanel({
+  home: HOME, profiles: () => [...profiles.values()], call,
+  mark: tabId => marks.get(tabId), dialog: tabId => state(tabId).dialog,
+  clearDialog: tabId => { state(tabId).dialog = null; },
+  popup: (p, tab, thread) => {
+    remember(p.instance, tab);
+    bearTabs.add(tab.tabId);
+    marks.used(tab.tabId, thread, 'opened a new page');
+    sent(tab.tabId, tab.url);
+  },
+});
+
 // What the pill in an agent's tab says it's doing, per command.
 const USES = {
   snap: () => 'looking at the page',
@@ -349,7 +363,9 @@ async function refusal(p, tabId) {
 async function send(p, tabId, method, params, timeoutMs) {
   // Input has its own short wait, where running out means "probably landed".
   if (method.startsWith('Input.')) return call(p, 'cdp', { tabId, method, params }, timeoutMs);
-  if (state(tabId).stuck) await stillStuck(p, tabId);
+  // Browser-side recovery must still work when the page's JavaScript is stuck.
+  const recovery = /^(Page\.(getNavigationHistory|navigate|handleJavaScriptDialog)$|Emulation\.(clearDeviceMetricsOverride|setFocusEmulationEnabled)$|Target\.getTargetInfo$)/.test(method);
+  if (state(tabId).stuck && !recovery) await stillStuck(p, tabId);
   try {
     return await call(p, 'cdp', { tabId, method, params }, timeoutMs);
   } catch (e) {
@@ -1150,6 +1166,8 @@ const commands = {
     return { pid: process.pid, socket: SOCKET, profiles: [...profiles.values()].map(describe) };
   },
 
+  panelState: () => panel.state(),
+
   async profiles() {
     const connected = [...profiles.values()];
     const known = chromeProfiles();
@@ -1190,6 +1208,7 @@ const commands = {
   async open({ profile, url, thread }) {
     const p = await findProfile(profile);
     const tab = remember(p.instance, await call(p, 'open', { url, thread }, 40_000));
+    panel.remember(tab.tabId, thread, p.instance, true);
     marks.used(tab.tabId, thread, `opening ${hostOf(url)}`);
     bearTabs.add(tab.tabId);
     sent(tab.tabId, url);
@@ -1224,6 +1243,7 @@ const commands = {
       return `several tabs match; pick one by id:\n${hits.map(({ p, t }) => `  ${t.tabId} [${describe(p)}] ${t.title.slice(0, 60)} <${t.url.slice(0, 100)}>`).join('\n')}`;
     }
     marks.used(hits[0].t.tabId, thread, 'looking at the page');
+    panel.remember(hits[0].t.tabId, thread, hits[0].p.instance);
     return snapshot(hits[0].t.tabId);
   },
 
@@ -1394,7 +1414,10 @@ const commands = {
   async handoff({ tab, thread, wait }) {
     const tabId = typeof tab === 'number' ? tab : await agentTabFor(tab);
     const p = await ownerOf(tabId);
-    const t = await call(p, 'handoff', { tabId }).catch((e) => {
+    panel.remember(tabId, thread, p.instance);
+    const inPanel = panel.hasViewer(tabId, p.instance);
+    panel.handedOff(tabId, p.instance, !inPanel);
+    const t = await (inPanel ? tabNow(tabId) : call(p, 'handoff', { tabId })).catch((e) => {
       if (/unknown op/.test(e.message)) throw new Error(`${describe(p)} has an older BrowserBear extension; browserbear reload, then try again`);
       // You closed the tab an agent had sent there: forget it, look again.
       if (typeof tab === 'string' && /no tab with id/i.test(e.message) && sentTo.delete(tabId)) return null;
@@ -1404,7 +1427,7 @@ const commands = {
     marks.handedOff(tabId, thread);
     // It's the user's now: no more pulling it forward for real clicks.
     bearTabs.delete(tabId);
-    const handed = p.instance === 'agent-chrome'
+    const handed = p.instance === 'agent-chrome' || inPanel
       ? `tab ${tabId} is in front of the user, in this thread's Browser panel in Threadbear: ${t.title} <${t.url}>`
       : `tab ${tabId} is in front of the user, in their own Chrome window: ${t.title} <${t.url}>`;
     if (wait) return { tabId, message: `${handed}\nWaiting for them to finish; they don't need to reply. A link to the same page as well would open a second tab.` };
@@ -1458,9 +1481,9 @@ const commands = {
 
   // After changing the extension's files: reloads it in every connected
   // profile (unpacked installs don't notice changes by themselves).
-  async reload() {
+  async reload({ profile } = {}) {
     const names = [];
-    for (const p of profiles.values()) {
+    for (const p of profile ? [await findProfile(profile)] : profiles.values()) {
       await call(p, 'reload').catch(() => {});
       names.push(describe(p));
     }
@@ -1480,12 +1503,15 @@ const commands = {
     tabOwner.delete(tab);
     bearTabs.delete(tab);
     sentTo.delete(tab);
+    panel.forget(tab, p.instance);
     return `closed tab ${tab}`;
   },
 };
 
 function onHostMessage(profile, msg) {
+  if (profiles.get(profile.instance) !== profile) return; // a replaced host's late reply/event
   if (msg.type === 'event') {
+    panel.event(profile, msg);
     if (msg.event === 'dialog') {
       state(msg.tabId).dialog = msg.params;
       // Whatever was waiting on that tab (a navigation, a click) is stuck
@@ -1499,6 +1525,7 @@ function onHostMessage(profile, msg) {
     }
     if (msg.event === 'dialogClosed') state(msg.tabId).dialog = null; // you answered it yourself
     if (msg.event === 'detached') log('detached', msg.tabId, msg.reason);
+    if (msg.event === 'detached') state(msg.tabId).dialog = null;
     // The buttons on the pill in an agent's tab.
     if (msg.event === 'mark' && msg.action === 'open') marks.open(msg.tabId);
     if (msg.event === 'mark' && msg.action === 'stop') marks.stop(msg.tabId);
@@ -1531,6 +1558,10 @@ async function onClientMessage(conn, msg) {
   let using = null; // the tab this command works in, for its marks
   busy++;
   try {
+    if (['panelAttach', 'panelCdp', 'panelWindow', 'panelResume', 'panelShowChrome'].includes(msg.cmd)) {
+      conn.write(line({ id: msg.id, ok: true, result: await panel.dispatch(conn, msg) }));
+      return;
+    }
     if (!fn) throw new Error(`unknown command ${msg.cmd}`);
     if (msg.cmd !== 'status') await hostsReady();
     const args = { ...(msg.args || {}), thread: msg.thread };
@@ -1538,6 +1569,8 @@ async function onClientMessage(conn, msg) {
     if (/^\d+$/.test(String(args.tab))) args.tab = Number(args.tab);
     if (typeof args.tab === 'number' && USES[msg.cmd]) {
       using = args.tab;
+      const profile = await ownerOf(using);
+      panel.remember(using, msg.thread, profile.instance);
       marks.begin(using, msg.thread, USES[msg.cmd](args));
     }
     conn.write(line({ id: msg.id, ok: true, result: await fn(args) }));
@@ -1560,8 +1593,13 @@ const server = net.createServer((conn) => {
         const known = chromeProfiles()?.find((p) => p.email && p.email === msg.email) || {};
         const old = profiles.get(msg.instance);
         // Same profile reconnecting: keep pending calls' bookkeeping fresh.
-        if (old && old.conn !== conn) old.conn.destroy();
-        profile = { instance: msg.instance, email: msg.email, name: msg.name || known.name || menuNames.get(msg.email), menuName: menuNames.get(msg.email), dir: known.dir, conn, pending: new Map() };
+        if (old && old.conn !== conn) {
+          panel.disconnected(old.instance);
+          for (const w of old.pending.values()) { clearTimeout(w.timer); w.reject(new Error(`${describe(old)} reconnected`)); }
+          old.pending.clear();
+          old.conn.destroy();
+        }
+        profile = { instance: msg.instance, email: msg.email, name: msg.name || known.name || menuNames.get(msg.email), menuName: menuNames.get(msg.email), dir: known.dir, panelPopups: msg.panelPopups === true, conn, pending: new Map() };
         profiles.set(msg.instance, profile);
         log('hello from', describe(profile), msg.version);
         marks.resend();
@@ -1579,6 +1617,7 @@ const server = net.createServer((conn) => {
   conn.on('error', () => {});
   conn.on('close', () => {
     if (role === 'host' && profiles.get(profile?.instance)?.conn === conn) {
+      panel.disconnected(profile.instance);
       for (const w of profile.pending.values()) {
         clearTimeout(w.timer);
         w.reject(new Error(`${describe(profile)} disconnected`));
@@ -1615,14 +1654,20 @@ function codeStamp() {
 
 function watch(ino) {
   const code = codeStamp();
-  setInterval(() => {
+  let quitting = false;
+  setInterval(async () => {
+    if (quitting) return;
     const now = fs.statSync(SOCKET, { throwIfNoEntry: false });
     if (now?.ino !== ino) {
+      quitting = true;
+      await panel.close();
       log('socket gone; exiting');
       process.exit(0);
     }
     const stamp = codeStamp();
     if (busy || !stamp || stamp === code) return;
+    quitting = true;
+    await panel.close();
     log('code changed; exiting so a fresh service starts');
     fs.rmSync(SOCKET, { force: true });
     process.exit(0);

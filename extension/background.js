@@ -43,7 +43,7 @@ async function hello() {
     return fresh;
   });
   const user = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' });
-  post({ type: 'hello', instance, email: user.email || null, version: chrome.runtime.getManifest().version });
+  post({ type: 'hello', instance, email: user.email || null, version: chrome.runtime.getManifest().version, panelPopups: true });
 }
 
 function post(msg) {
@@ -100,6 +100,7 @@ const loadError = (t) => {
 const tabInfo = (t) => ({
   tabId: t.id,
   windowId: t.windowId,
+  openerTabId: t.openerTabId,
   url: t.url || t.pendingUrl || '',
   // Without the mark's "🐻 name · ", so agents see the page's own title.
   title: (t.title || '').replace(MARK_PREFIX, ''),
