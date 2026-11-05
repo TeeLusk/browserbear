@@ -35,22 +35,22 @@ const tabState = new Map(); // tabId -> { refs: RefMap, last: string[] | null, d
 const sentTo = new Map(); // tabId -> pages an agent opened or sent it to
 // The user's own tabs an agent has been let into, with claim or --user-tab.
 const claimed = new Set();
-// Agent tabs handed to the user in Threadbear's Browser panel (and every
-// handoff in the agent's own Chrome, which is drawn there). They stay in
-// BrowserBear's window, so the window alone doesn't say they're the user's now.
-// On disk, so a service restart mid sign-in doesn't make them closable again.
-const PANEL_HANDED = path.join(HOME, 'panel-handed.json');
-const panelHanded = new Set((() => {
-  try { return JSON.parse(fs.readFileSync(PANEL_HANDED, 'utf8')); } catch { return []; }
+// Tabs handed to the user that they haven't finished with. Kept here as well
+// as by the extension, because a tab handed over in Threadbear's Browser panel,
+// or in a profile with no other window to move it to, or a popup, stays where
+// it was, so its window doesn't say it's the user's now. On disk, so a service
+// restart mid sign-in doesn't make them closable again.
+const HANDED = path.join(HOME, 'handed.json');
+const handed = new Set((() => {
+  try { return JSON.parse(fs.readFileSync(HANDED, 'utf8')); } catch { return []; }
 })());
-const savePanelHanded = () => {
-  try { fs.writeFileSync(PANEL_HANDED, JSON.stringify([...panelHanded]), { mode: 0o600 }); } catch (e) { log('cannot save panel handoffs:', e.message); }
+const setHanded = (tabId, on) => {
+  if (handed.has(tabId) === on) return;
+  on ? handed.add(tabId) : handed.delete(tabId);
+  try { fs.writeFileSync(HANDED, JSON.stringify([...handed]), { mode: 0o600 }); } catch (e) { log('cannot save handoffs:', e.message); }
 };
-const setPanelHanded = (tabId, on) => {
-  if (panelHanded.has(tabId) === on) return;
-  on ? panelHanded.add(tabId) : panelHanded.delete(tabId);
-  savePanelHanded();
-};
+// Popups the Browser panel saw an agent's page open, in windows of their own.
+const panelPopups = new Set();
 let nextId = 1;
 
 // Chrome's own list of profiles, so "Work" or "Profile 2" or the email
@@ -275,17 +275,17 @@ async function whose(tabId) {
   const tabs = await call(p, 'tabs');
   const t = tabs.find((x) => x.tabId === tabId);
   if (!t) throw Object.assign(new Error(closedMessage(tabId)), { closed: true });
+  if (handed.has(tabId)) return { who: 'handed', t, p };
   if (t.agent === undefined) return { who: bearTabs.has(tabId) ? 'agent' : null, t, p };
-  if (t.bear !== false && !panelHanded.has(tabId)) return { who: 'agent', t, p };
+  if (t.bear !== false) return { who: 'agent', t, p };
   if (t.agent) return { who: 'handed', t, p };
   if (claimed.has(tabId)) return { who: 'claimed', t, p };
-  // A popup the Browser panel saw an agent's page open.
-  if (bearTabs.has(tabId)) return { who: 'agent', t, p };
+  if (panelPopups.has(tabId)) return { who: 'agent', t, p };
   // A popup an agent's page opened (a Google sign-in, say) is in a window of
   // its own, not BrowserBear's, but it's still the agent's to finish.
   for (let at = t, i = 0; at?.openerTabId != null && i < 5; i++) {
     at = tabs.find((x) => x.tabId === at.openerTabId);
-    if (at && at.bear && !panelHanded.has(at.tabId)) return { who: 'agent', t, p };
+    if (at && at.bear && !handed.has(at.tabId)) return { who: 'agent', t, p };
   }
   return { who: 'user', t, p };
 }
@@ -337,6 +337,7 @@ const panel = createPanel({
   popup: (p, tab, thread) => {
     remember(p.instance, tab);
     bearTabs.add(tab.tabId);
+    panelPopups.add(tab.tabId);
     marks.used(tab.tabId, thread, 'opened a new page');
     sent(tab.tabId, tab.url);
   },
@@ -1389,15 +1390,20 @@ const commands = {
   async tabs({ profile }) {
     const list = profile ? [await findProfile(profile)] : [...profiles.values()];
     const out = [];
+    const seen = new Set();
     for (const p of list) {
       out.push(`${describe(p)}:`);
       for (const t of await call(p, 'tabs')) {
+        seen.add(t.tabId);
         remember(p.instance, t);
         // So an agent can tell its own tab from the user's on the same page.
-        const user = t.agent === false && !claimed.has(t.tabId) ? " (the user's)" : t.agent && t.bear === false ? ' (handed to the user)' : '';
+        const user = handed.has(t.tabId) || (t.agent && t.bear === false) ? ' (handed to the user)' : t.agent === false && !claimed.has(t.tabId) ? " (the user's)" : '';
         out.push(`  ${t.tabId}${t.active ? '*' : ' '} ${t.title.slice(0, 60)} <${t.url.slice(0, 100)}>${user}${marks.label(t.tabId)}`);
       }
     }
+    // Handoffs of tabs that have since closed, so a later tab given the same id
+    // (Chrome starts them again after a restart) isn't taken for one.
+    if (!profile) for (const id of handed) if (!seen.has(id)) setHanded(id, false);
     return out.join('\n');
   },
 
@@ -1616,7 +1622,7 @@ const commands = {
     const requested = thread && tbPath() && await panel.prepareHandoff(tabId, p.instance) ? await showBrowserPanel(thread) : null;
     const inPanel = Boolean(requested) || panel.hasViewer(tabId, p.instance);
     panel.handedOff(tabId, p.instance, !inPanel);
-    if (inPanel || p.instance === 'agent-chrome') setPanelHanded(tabId, true);
+    setHanded(tabId, true);
     const t = await (inPanel ? tabNow(tabId) : call(p, 'handoff', { tabId })).catch((e) => {
       if (/unknown op/.test(e.message)) throw new Error(`${describe(p)} has an older BrowserBear extension; browserbear reload, then try again`);
       // You closed the tab an agent had sent there: forget it, look again.
@@ -1649,6 +1655,7 @@ const commands = {
     const t = tabs.find((x) => x.tabId === tab);
     if (!t) {
       marks.closed(tab);
+      setHanded(tab, false);
       return { gone: true };
     }
     marks.waiting(tab, thread);
@@ -1676,7 +1683,9 @@ const commands = {
 
   async handoffFinished({ tab }) {
     marks.finished(tab);
-    setPanelHanded(tab, false); // back in BrowserBear's window, it's the agent's again
+    // Finished. Still in the user's window, the extension says it's theirs;
+    // back in BrowserBear's (or the panel), it's the agent's again.
+    setHanded(tab, false);
     return true;
   },
 
@@ -1705,7 +1714,8 @@ const commands = {
     bearTabs.delete(tab);
     sentTo.delete(tab);
     claimed.delete(tab);
-    setPanelHanded(tab, false);
+    setHanded(tab, false);
+    panelPopups.delete(tab);
     panel.forget(tab, p.instance);
     return `closed tab ${tab}`;
   },
@@ -1796,7 +1806,8 @@ async function onClientMessage(conn, msg) {
       }
       // Only looking at one of the user's tabs doesn't mark it: an eval or a
       // show left Mike's own X and LinkedIn tabs titled with a thread's name.
-      if (USES[msg.cmd] && owner.who !== 'user') {
+      // Nor does one an old extension can't place.
+      if (USES[msg.cmd] && owner.who && owner.who !== 'user') {
         using = args.tab;
         panel.remember(using, msg.thread, owner.p.instance);
         marks.begin(using, msg.thread, USES[msg.cmd](args));

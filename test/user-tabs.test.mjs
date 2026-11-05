@@ -30,6 +30,8 @@ test("close, goto and the like refuse the user's own tabs; looking doesn't mark 
       ].filter((x) => !closed.includes(x.tabId));
     }
     if (op === 'open') return { tabId: 5, url: args.url, title: 'Opened', active: true, agent: true, bear: true };
+    // Moved nowhere: a profile with no other window, or a popup.
+    if (op === 'handoff') return { tabId: args.tabId, url: 'https://example/', title: 'Handed', active: true };
     if (op === 'close') return closed.push(args.tabId), true;
     if (op === 'mark') return marked.push([args.tabId, args.mark && args.mark.name]), true;
     if (op === 'cdp') {
@@ -81,9 +83,16 @@ test("close, goto and the like refuse the user's own tabs; looking doesn't mark 
   assert.deepEqual(marked.at(-1), [4, null]);
   await fails(browserbear('cdp', '4', 'Page.reload'), /won't cdp in it/);
 
-  // An agent's popup is the agent's to work in and close.
+  // An agent's popup is the agent's to work in and close, until it's handed over.
   await browserbear('cdp', '9', 'Page.reload');
-  assert.equal(await browserbear('close', '9'), 'closed tab 9');
+  await browserbear('handoff', '9');
+  await fails(browserbear('close', '9'), /tab 9 is one an agent handed to the user/);
+  assert.equal(await browserbear('close', '9', '--user-tab'), 'closed tab 9');
+  // So is a tab handed over that stays in BrowserBear's window.
+  await browserbear('handoff', '8');
+  assert.match(await browserbear('tabs'), /\n {2}8\* .*\(handed to the user\)/);
+  await fails(browserbear('close', '8'), /tab 8 is one an agent handed to the user/);
+  await browserbear('cdp', '8', 'Page.reload'); // the agent can still carry on in it
 
   // claim takes a tab id too, and lets the agent in.
   await fails(browserbear('cdp', '6', 'Page.reload'), /won't cdp in it/);
