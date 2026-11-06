@@ -16,7 +16,7 @@ import { createMarks } from './marks.mjs';
 import { domainOf, looksLikeEmail, menuProfiles, openByEmail, openByMenu } from './chrome.mjs';
 import { RefMap, compact, diff, sameApartFromFocus } from './snapshot.mjs';
 import { createPanel } from './panel.mjs';
-import { loginsFor, pickLogin, secretsFor } from './onepassword.mjs';
+import { loginMatches, loginsFor, pickLogin, secretsFor } from './onepassword.mjs';
 import { tbPath, showBrowserPanel } from './threadbear.mjs';
 
 fs.mkdirSync(LOGS, { recursive: true, mode: 0o700 });
@@ -42,6 +42,13 @@ const claimed = new Set();
 // it was, so its window doesn't say it's the user's now. On disk, so a service
 // restart mid sign-in doesn't make them closable again.
 const HANDED = path.join(HOME, 'handed.json');
+// Agent-only (Mike's trial, 6 Nov 2026; see keepToAgentChrome): up here
+// because ownerOf and remember check it.
+const AGENT_ONLY = path.join(HOME, 'agent-only');
+const AGENT_INSTANCE = 'agent-chrome';
+function agentOnlyOn() {
+  return fs.existsSync(AGENT_ONLY);
+}
 const handed = new Set((() => {
   try { return JSON.parse(fs.readFileSync(HANDED, 'utf8')); } catch { return []; }
 })());
@@ -253,6 +260,17 @@ function call(profile, op, args = {}, timeoutMs = 30_000) {
 }
 
 async function ownerOf(tabId) {
+  // Agent-only: the agent's Chrome or nothing, for every command and every
+  // CDP call, so a tab id that's also one of Mike's (the agent's start at
+  // 1001) can't end up in his profile (Codex review, 6 Nov).
+  if (agentOnlyOn()) {
+    const agent = profiles.get(AGENT_INSTANCE);
+    if (agent && (tabOwner.get(tabId) === AGENT_INSTANCE || (await call(agent, 'tabs')).some((t) => t.tabId === tabId))) {
+      tabOwner.set(tabId, AGENT_INSTANCE);
+      return agent;
+    }
+    throw agentOnlyRefusal(`it won't work in tab ${tabId}, which isn't in the agent's Chrome`);
+  }
   const known = profiles.get(tabOwner.get(tabId));
   if (known) return known;
   for (const p of profiles.values()) {
@@ -640,7 +658,7 @@ async function snapshot(tabId, { full = false } = {}) {
   await wake(tabId);
   await cdp(tabId, 'Page.enable');
   const [{ nodes }, files] = await Promise.all([cdp(tabId, 'Accessibility.getFullAXTree'), fileInputs(tabId)]);
-  const lines = compact(nodes, s.refs, files);
+  const lines = compact(nodes, s.refs, files, (await stillFilled(tabId)) || undefined);
   const out = full ? { full: true, text: lines.join('\n') } : diff(s.last, lines);
   s.last = lines;
   const tab = (await call(await ownerOf(tabId), 'tabs')).find((t) => t.tabId === tabId);
@@ -1353,9 +1371,10 @@ async function agentTabFor(url) {
   // Where agents sent tabs is known here, so that's checked without asking
   // Chrome: listing every profile's tabs can take seconds while their
   // extensions wake, and Threadbear is waiting to open the link.
-  for (const [tabId, pages] of sentTo) if (pages.has(want) && profiles.has(tabOwner.get(tabId))) return tabId;
+  const only = agentOnlyOn();
+  for (const [tabId, pages] of sentTo) if (pages.has(want) && profiles.has(tabOwner.get(tabId)) && (!only || tabOwner.get(tabId) === AGENT_INSTANCE)) return tabId;
   const lists = await Promise.all(
-    [...profiles.values()].map((p) => call(p, 'tabs').then((tabs) => tabs.map((t) => remember(p.instance, t)), () => [])),
+    [...profiles.values()].filter((p) => !only || p.instance === AGENT_INSTANCE).map((p) => call(p, 'tabs').then((tabs) => tabs.map((t) => remember(p.instance, t)), () => [])),
   );
   const hit = lists.flat().find((t) => (t.agent || bearTabs.has(t.tabId)) && page(t.url) === want);
   if (!hit) throw new Error(`no agent tab is open on ${url}`);
@@ -1368,6 +1387,8 @@ function sent(tabId, url) {
 }
 
 const remember = (instance, tab) => {
+  // Agent-only: one of Mike's tabs with the same id mustn't take it over.
+  if (agentOnlyOn() && instance !== AGENT_INSTANCE && tabOwner.get(tab.tabId) === AGENT_INSTANCE) return tab;
   tabOwner.set(tab.tabId, instance);
   return tab;
 };
@@ -1529,42 +1550,60 @@ const commands = {
   // and one-time code the page is asking for now, so a two-step sign-in
   // (Google's email page, then its password page) takes a fill on each. The
   // values go from 1Password into the page and nowhere else: what comes back
-  // is which login and which fields, not the page.
+  // is which login and which fields, nothing the page wrote. Until the tab
+  // loads another page, eval and cdp are refused there and snapshots hide the
+  // filled fields, so the values can't be read back either.
   async fill({ tab, item, submit }) {
     if ((await ownerOf(tab)).instance !== AGENT_INSTANCE) throw new Error(`fill only signs in in the agent's own Chrome (--profile agent), not tab ${tab}`);
-    const t = await tabNow(tab);
-    await cdp(tab, 'Runtime.enable').catch(() => {});
-    const found = (await cdp(tab, 'Runtime.evaluate', { expression: FIND_LOGIN_FIELDS, returnByValue: true })).result?.value || {};
-    if (!found.user && !found.password && !found.otp) {
-      throw new Error(`tab ${tab} (${t.url.slice(0, 100)}) has no sign-in field fill can see (it doesn't reach into frames). Snap it, or hand it to the user: browserbear handoff ${tab} --wait`);
+    await cdp(tab, 'Page.enable');
+    const { frameTree } = await cdp(tab, 'Page.getFrameTree');
+    const startUrl = frameTree.frame.url;
+    const { executionContextId } = await cdp(tab, 'Page.createIsolatedWorld', { frameId: frameTree.frame.id, worldName: 'browserbear-fill' });
+    const { result: doc } = await cdp(tab, 'Runtime.evaluate', { expression: 'document', contextId: executionContextId });
+    const { result: found } = await cdp(tab, 'Runtime.callFunctionOn', { objectId: doc.objectId, functionDeclaration: FIND_LOGIN_FIELDS, returnByValue: false });
+    const props = Object.fromEntries((await cdp(tab, 'Runtime.getProperties', { objectId: found.objectId, ownProperties: true })).result.map((x) => [x.name, x.value]));
+    const field = (name) => (props[name]?.subtype === 'node' ? props[name].objectId : null);
+    const fields = { user: field('user'), password: field('password'), otp: field('otp') };
+    if (!fields.user && !fields.password && !fields.otp) {
+      throw new Error(`tab ${tab} has no sign-in field fill can see (it doesn't reach into frames). Snap it, or hand it to the user: browserbear handoff ${tab} --wait`);
     }
-    const login = pickLogin(await loginsFor(t.url), item, t.url);
-    const secret = await secretsFor(login.id, { otp: Boolean(found.otp) });
+    if (fields.otp && props.splitCode?.value) {
+      throw new Error(`tab ${tab} wants a one-time code split across several boxes, which fill doesn't type. Hand it to the user: browserbear handoff ${tab} --wait`);
+    }
+    const logins = await loginsFor(startUrl);
+    const login = pickLogin(logins, item, startUrl);
+    const secret = await secretsFor(login.id, { otp: Boolean(fields.otp) });
+    if (fields.otp && !secret.hasOtp) {
+      throw new Error(`the page wants a one-time code, but "${login.title}" in 1Password has none. Hand it to the user: browserbear handoff ${tab} --wait`);
+    }
     const filled = [];
-    const put = async (which, value) => {
-      const focused = (await cdp(tab, 'Runtime.evaluate', { expression: `(() => { const e = document.querySelector('[data-browserbear-fill="${which}"]'); if (!e) return false; e.focus(); e.select?.(); return document.activeElement === e; })()`, returnByValue: true })).result?.value;
-      if (!focused) throw new Error(`the page changed before fill could type into its ${which} field; snap ${tab} and try again`);
-      await cdp(tab, 'Input.insertText', { text: value });
-      filled.push(which === 'otp' ? 'one-time code' : which === 'user' ? 'username' : 'password');
-    };
+    const backendIds = [];
     try {
-      if (found.user && secret.username) await put('user', secret.username);
-      if (found.password && secret.password) await put('password', secret.password);
-      if (found.otp) {
-        if (!secret.hasOtp) throw new Error(`the page wants a one-time code, but "${login.title}" in 1Password has none. Hand it to the user: browserbear handoff ${tab} --wait`);
-        await put('otp', secret.otp);
+      for (const [which, value, label] of [['user', secret.username, 'username'], ['password', secret.password, 'password'], ['otp', secret.otp, 'one-time code']]) {
+        if (!fields[which] || !value) continue;
+        // Approving in 1Password takes a while; the tab may have gone
+        // somewhere else meanwhile, and a login only goes to its own site.
+        const at = (await cdp(tab, 'Runtime.callFunctionOn', { objectId: fields[which], functionDeclaration: FOCUS_FIELD, returnByValue: true })).result?.value;
+        if (!at) throw new FillStopped(`the page changed before fill could type the ${label}`);
+        if (!loginMatches(login, at)) throw new FillStopped(`the tab is no longer on a site "${login.title}" is saved for`);
+        backendIds.push((await cdp(tab, 'DOM.describeNode', { objectId: fields[which] })).node.backendNodeId);
+        await cdp(tab, 'Input.insertText', { text: value });
+        filled.push(label);
       }
+    } catch (e) {
+      // Whatever the page did meanwhile (a dialog, say) can carry what was
+      // typed, so only fill's own words go back.
+      throw e instanceof FillStopped ? new Error(`fill stopped: ${e.message}${filled.length ? ` (after the ${filled.join(', ')})` : ''}. Snap tab ${tab} to see where it is`) : new Error(`fill stopped in tab ${tab}${filled.length ? ` after the ${filled.join(', ')}` : ''}: the page changed or showed a dialog. Snap it to see where it is`);
     } finally {
-      await cdp(tab, 'Runtime.evaluate', { expression: `document.querySelectorAll('[data-browserbear-fill]').forEach((e) => e.removeAttribute('data-browserbear-fill'))` }).catch(() => {});
+      if (backendIds.length) protectFilled(tab, frameTree.frame.loaderId, backendIds);
     }
     if (!filled.length) throw new Error(`"${login.title}" in 1Password has nothing for the fields on this page`);
     if (submit) {
       await markPage(tab);
-      await pressKey(tab, 'Enter');
-      await settleAfterAction(tab);
+      await pressKey(tab, 'Enter').catch(() => {});
+      await settleAfterAction(tab).catch(() => {});
     }
-    const now = await tabNow(tab).catch(() => t);
-    return `filled the ${filled.join(', ')} from 1Password ("${login.title}") in tab ${tab}${submit ? ' and pressed Enter' : "; press the page's sign-in button (or run fill again with --submit)"}. Now on: ${now.title} <${now.url.slice(0, 100)}>`;
+    return `filled the ${filled.join(', ')} from 1Password ("${login.title}") in tab ${tab}${submit ? ' and pressed Enter' : "; press the page's sign-in button (or run fill again with --submit)"}. Snap it to see the next step.`;
   },
 
   key: ({ tab, key }) =>
@@ -1837,32 +1876,62 @@ async function hostsReady() {
   await sleep(Math.max(0, 1_000 - (Date.now() - startedAt)));
 }
 
-// Marks the sign-in fields a page shows now, for fill: the visible
-// username (or email), password and one-time code inputs.
-const FIND_LOGIN_FIELDS = `(() => {
-  document.querySelectorAll('[data-browserbear-fill]').forEach((e) => e.removeAttribute('data-browserbear-fill'));
+class FillStopped extends Error {}
+
+// Tabs fill has typed into: the page it typed on, and the fields, so the
+// values can't be read straight back with eval, cdp or a snapshot.
+const filledTabs = new Map(); // tabId -> { loaderId, nodes: Set<backendNodeId> }
+function protectFilled(tabId, loaderId, nodes) {
+  const was = filledTabs.get(tabId);
+  const set = was && was.loaderId === loaderId ? was.nodes : new Set();
+  for (const n of nodes) set.add(n);
+  filledTabs.set(tabId, { loaderId, nodes: set });
+}
+// The filled fields' ids while the tab is still on the page fill typed on.
+async function stillFilled(tabId) {
+  const f = filledTabs.get(tabId);
+  if (!f) return null;
+  const now = await cdp(tabId, 'Page.getFrameTree').then((r) => r.frameTree.frame.loaderId, () => null);
+  if (now && now !== f.loaderId) {
+    filledTabs.delete(tabId);
+    return null;
+  }
+  return f.nodes;
+}
+
+// Finds the sign-in fields a page shows now, for fill: the visible username
+// (or email), password and one-time code inputs. Run in an isolated world, so
+// the page's own scripts can't swap the DOM functions it uses, and it hands
+// back the elements themselves rather than marks the page could move.
+const FIND_LOGIN_FIELDS = `function () {
   const shown = (e) => !e.disabled && !e.readOnly && e.getClientRects().length > 0 && (e.checkVisibility ? e.checkVisibility() : true);
   const inputs = [...document.querySelectorAll('input')].filter(shown);
   const words = (e) => [e.name, e.id, e.placeholder, e.getAttribute('aria-label'), e.autocomplete].join(' ');
   const textish = (e) => ['text', 'email', 'tel', ''].includes(e.type);
   const password = inputs.find((e) => e.type === 'password');
-  const otp = password ? null : inputs.find((e) => (textish(e) || e.type === 'number') && (e.autocomplete === 'one-time-code' || /otp|totp|2fa|mfa|one.?time|verification.?code|security.?code|authenticat/i.test(words(e))));
-  let user = inputs.find((e) => textish(e) && e !== otp && (e.type === 'email' || /username|email/i.test(e.autocomplete) || /user|email|login|account|identifier/i.test(words(e))));
-  if (!user && password) user = inputs.filter((e) => textish(e) && e.compareDocumentPosition(password) & Node.DOCUMENT_POSITION_FOLLOWING).pop();
-  if (user) user.setAttribute('data-browserbear-fill', 'user');
-  if (password) password.setAttribute('data-browserbear-fill', 'password');
-  if (otp) otp.setAttribute('data-browserbear-fill', 'otp');
-  return { user: Boolean(user), password: Boolean(password), otp: Boolean(otp) };
-})()`;
+  const otps = inputs.filter((e) => (textish(e) || e.type === 'number') && (e.autocomplete === 'one-time-code' || /otp|totp|2fa|mfa|one.?time|verification.?code|security.?code|authenticat/i.test(words(e))));
+  let user = inputs.find((e) => textish(e) && !otps.includes(e) && (e.type === 'email' || /username|email/i.test(e.autocomplete) || /user|email|login|account|identifier/i.test(words(e))));
+  if (!user && password) user = inputs.filter((e) => textish(e) && !otps.includes(e) && e.compareDocumentPosition(password) & Node.DOCUMENT_POSITION_FOLLOWING).pop();
+  return { user: user || null, password: password || null, otp: otps[0] || null, splitCode: otps.length > 1 || otps.some((e) => e.maxLength === 1) };
+}`;
+
+// Focuses one field fill found, if it's still there and the page hasn't moved
+// on, and says where it is, so the caller can check the site once more right
+// before typing.
+const FOCUS_FIELD = `function () {
+  if (!this.isConnected || this.disabled || this.readOnly || !this.getClientRects().length) return null;
+  this.focus();
+  if (this.select) this.select();
+  return document.activeElement === this && document.hasFocus() ? location.href : null;
+}`;
 
 // Agent-only trial (Mike, 6 Nov 2026). While this file exists, agents keep
 // to the agent's own Chrome, whose pages show in Threadbear's Browser panel,
 // and Mike's own profiles are refused with what to do instead. He's trying it
 // on his Mac before it goes to anyone else, so it's off unless the file is
 // there: `browserbear agent-only on|off`.
-const AGENT_ONLY = path.join(HOME, 'agent-only');
-const AGENT_INSTANCE = 'agent-chrome';
-const PROFILE_CMDS = new Set(['open', 'tabs', 'claim']);
+
+const PROFILE_CMDS = new Set(['open', 'tabs', 'claim', 'reload']);
 function agentOnlyRefusal(what) {
   return new Error(
     `BrowserBear is agent-only on this Mac (Mike's trial), so ${what}. Use --profile agent: its pages show in Threadbear's Browser panel. ` +
@@ -1895,7 +1964,11 @@ async function onClientMessage(conn, msg) {
     const args = { ...(msg.args || {}), thread: msg.thread };
     // Left as text when it isn't a number: handoff also takes a URL.
     if (/^\d+$/.test(String(args.tab))) args.tab = Number(args.tab);
-    if (fs.existsSync(AGENT_ONLY) && !['status', 'profiles', 'reload'].includes(msg.cmd)) await keepToAgentChrome(msg.cmd, args);
+    // reload with no profile only reloads the extension where it's running.
+    if (['eval', 'cdp'].includes(msg.cmd) && typeof args.tab === 'number' && (await stillFilled(args.tab))) {
+      throw new Error(`${msg.cmd} is off in tab ${args.tab} until it leaves the page fill signed in on, so what was filled can't be read back. snap, click and key still work`);
+    }
+    if (agentOnlyOn() && !['status', 'profiles'].includes(msg.cmd) && !(msg.cmd === 'reload' && !args.profile)) await keepToAgentChrome(msg.cmd, args);
     if (typeof args.tab === 'number' && (USES[msg.cmd] || msg.cmd === 'close')) {
       const owner = await whose(args.tab);
       // Only a tab known to be an agent's closes without asking. Commands that

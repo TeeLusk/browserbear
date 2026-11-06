@@ -68,7 +68,7 @@ function fileInputLine(ref, f, axName, hidden) {
 }
 
 // fileInputs: backendDOMNodeId -> { id, label, accept, multiple, disabled }
-export function compact(axNodes, refs, fileInputs = new Map()) {
+export function compact(axNodes, refs, fileInputs = new Map(), masked = new Set()) {
   const byId = new Map(axNodes.map((n) => [n.nodeId, n]));
   const root = axNodes.find((n) => !n.parentId) || axNodes[0];
   const lines = [];
@@ -93,7 +93,7 @@ export function compact(axNodes, refs, fileInputs = new Map()) {
         if (name) text += ` "${name}"`;
         const value = node.value?.value;
         if (value !== undefined && value !== '' && value !== name) {
-          text += SECRET_NAME.test(name) ? ' = "••••"' : ` = "${clip(value)}"`;
+          text += SECRET_NAME.test(name) || masked.has(node.backendDOMNodeId) ? ' = "••••"' : ` = "${clip(value)}"`;
         }
         const flags = FLAGS.filter((f) => {
           const v = propValue(node, f);

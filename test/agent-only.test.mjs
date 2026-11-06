@@ -22,7 +22,7 @@ test("agent-only refuses the user's profiles and their tabs, and is off by defau
   await fails(browserbear('tabs', '--profile', 'me@example.com'), /won't use the profile/);
   await fails(browserbear('claim', 'x.com', '--profile', 'me@example.com'), /won't use the profile/);
   // A tab in one of the user's profiles, even one an agent opened there earlier.
-  await fails(browserbear('snap', '1'), /won't work in tab 1, which is in one of Mike's own profiles/);
+  await fails(browserbear('snap', '1'), /won't work in tab 1, which isn't in the agent's Chrome/);
   await fails(browserbear('close', '1'), /won't work in tab 1/);
   // Status and the profile list still answer.
   assert.match(await browserbear('profiles'), /me@example\.com/);

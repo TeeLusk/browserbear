@@ -4,57 +4,95 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { startBear, root } from './harness.mjs';
-import { pickLogin, sameSite } from '../service/onepassword.mjs';
+import { loginMatches, pickLogin, sameSite } from '../service/onepassword.mjs';
 
-test('sameSite and pickLogin', () => {
+const OP = path.join(root, 'test', 'fakes', 'op.mjs');
+
+test('which sites a login goes to', () => {
   assert.ok(sameSite('accounts.google.com', 'google.com'));
-  assert.ok(sameSite('google.com', 'accounts.google.com'));
+  // Never up to a parent, nor to a stranger's subdomain on shared hosting.
+  assert.ok(!sameSite('google.com', 'accounts.google.com'));
   assert.ok(!sameSite('notgoogle.com', 'google.com'));
+  assert.ok(!sameSite('evil.github.io', 'github.io'));
+  assert.ok(sameSite('mike.github.io', 'mike.github.io'));
+  const login = { hosts: ['example.com'] };
+  assert.ok(loginMatches(login, 'https://example.com/login'));
+  assert.ok(!loginMatches(login, 'http://example.com/login'));
   const logins = [{ id: 'a', title: 'Work' }, { id: 'b', title: 'Home' }];
   assert.equal(pickLogin(logins, 'home', 'https://x.test').id, 'b');
   assert.throws(() => pickLogin(logins, undefined, 'https://x.test'), /2 logins for x\.test; say which with --item/);
   assert.throws(() => pickLogin([], undefined, 'https://x.test'), /no login saved for x\.test.*handoff/);
 });
 
+// A fake agent Chrome page: which fields it has, where the tab is when fill
+// focuses a field, and what got typed.
+function fakePage() {
+  const page = { fields: { user: true, password: true, otp: false }, split: false, at: 'https://example.com/login', loader: 'L1', typed: [] };
+  page.onOp = ({ op, args }) => {
+    if (op === 'tabs') return [{ tabId: 7, url: 'https://example.com/login', title: 'Sign in', active: true, agent: true, bear: true }];
+    if (op !== 'cdp') return {};
+    const { method, params = {} } = args;
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'F', url: 'https://example.com/login', loaderId: page.loader } } };
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: 9 };
+    if (method === 'Runtime.evaluate' && params.expression === 'document') return { result: { objectId: 'doc' } };
+    if (method === 'Runtime.evaluate') return { result: { type: 'string', value: 'Sign in' } };
+    if (method === 'Runtime.callFunctionOn' && params.objectId === 'doc') return { result: { objectId: 'found' } };
+    if (method === 'Runtime.getProperties') {
+      const node = (name) => ({ name, value: page.fields[name] ? { subtype: 'node', objectId: `el-${name}` } : { subtype: 'null' } });
+      return { result: [node('user'), node('password'), node('otp'), { name: 'splitCode', value: { value: page.split } }] };
+    }
+    if (method === 'Runtime.callFunctionOn') return { result: { value: page.at } };
+    if (method === 'DOM.describeNode') return { node: { backendNodeId: 40 } };
+    if (method === 'Input.insertText') return page.typed.push(params.text), {};
+    if (method === 'Accessibility.getFullAXTree') {
+      return { nodes: [{ nodeId: '1', role: { value: 'RootWebArea' }, childIds: ['2'] }, { nodeId: '2', parentId: '1', role: { value: 'textbox' }, name: { value: 'Email' }, value: { value: 'user-bbb@example.com' }, backendDOMNodeId: 40 }] };
+    }
+    return {};
+  };
+  return page;
+}
+
 test("fill types the login into the agent's page and never prints it", async (t) => {
-  const typed = [];
-  let fields = { user: true, password: true, otp: false };
-  const { browserbear } = await startBear(
-    t,
-    ({ op, args }) => {
-      if (op === 'tabs') return [{ tabId: 7, url: 'https://example.com/login', title: 'Sign in', active: true, agent: true, bear: true }];
-      if (op === 'cdp' && args.method === 'Runtime.evaluate') {
-        if (args.params.expression.includes('FIND') || args.params.expression.includes('compareDocumentPosition')) return { result: { value: fields } };
-        if (args.params.expression.includes('activeElement')) return { result: { value: true } };
-        return { result: { value: null } };
-      }
-      if (op === 'cdp' && args.method === 'Input.insertText') return typed.push(args.params.text), {};
-      return {};
-    },
-    { BROWSERBEAR_OP: path.join(root, 'test', 'fakes', 'op.mjs') },
-    // As the agent's own Chrome, the only place fill works.
-    { instance: 'agent-chrome' },
-  );
+  const page = fakePage();
+  const { browserbear } = await startBear(t, page.onOp, { BROWSERBEAR_OP: OP }, { instance: 'agent-chrome' });
   const fails = (p, re) => assert.rejects(p, (e) => (assert.match(e.stderr, re), true));
 
   // Two logins for the site: it asks which, by name.
   await fails(browserbear('fill', '7'), /2 logins for example\.com; say which with --item.*"Example work" \(aaa/s);
   const out = await browserbear('fill', '7', '--item', 'Example personal');
-  assert.deepEqual(typed, ['user-bbb@example.com', 'pw-bbb-secret']);
+  assert.deepEqual(page.typed, ['user-bbb@example.com', 'pw-bbb-secret']);
   assert.match(out, /filled the username, password from 1Password \("Example personal"\) in tab 7/);
   assert.doesNotMatch(out, /pw-bbb|user-bbb/);
 
+  // The values can't be read back on that page: no eval or cdp, and snapshots hide them.
+  await fails(browserbear('eval', '7', 'document.title'), /eval is off in tab 7 until it leaves the page fill signed in on/);
+  await fails(browserbear('cdp', '7', 'Runtime.evaluate', '{}'), /cdp is off in tab 7/);
+  const snap = await browserbear('snap', '7');
+  assert.match(snap, /textbox "Email" = "••••"/);
+  assert.doesNotMatch(snap, /user-bbb/);
+  // A new page: eval works again.
+  page.loader = 'L2';
+  await browserbear('eval', '7', 'document.title');
+
   // The code step of a two-step sign-in.
-  typed.length = 0;
-  fields = { user: false, password: false, otp: true };
+  page.typed.length = 0;
+  page.fields = { user: false, password: false, otp: true };
   assert.match(await browserbear('fill', '7', '--item', 'aaa'), /filled the one-time code/);
-  assert.deepEqual(typed, ['123456']);
+  assert.deepEqual(page.typed, ['123456']);
   await fails(browserbear('fill', '7', '--item', 'bbb'), /wants a one-time code, but "Example personal" in 1Password has none/);
+  page.split = true;
+  await fails(browserbear('fill', '7', '--item', 'aaa'), /split across several boxes/);
+});
+
+test('fill stops if the tab went to another site while 1Password was asking', async (t) => {
+  const page = fakePage();
+  page.at = 'https://evil.test/login';
+  const { browserbear } = await startBear(t, page.onOp, { BROWSERBEAR_OP: OP }, { instance: 'agent-chrome' });
+  await assert.rejects(browserbear('fill', '7', '--item', 'aaa'), (e) => (assert.match(e.stderr, /fill stopped: the tab is no longer on a site "Example work" is saved for/), true));
+  assert.deepEqual(page.typed, []);
 });
 
 test("fill won't sign in in the user's own profiles", async (t) => {
-  const { browserbear } = await startBear(t, ({ op }) => (op === 'tabs' ? [{ tabId: 7, url: 'https://example.com/', title: 'X', active: true, agent: true, bear: true }] : {}), {
-    BROWSERBEAR_OP: path.join(root, 'test', 'fakes', 'op.mjs'),
-  });
+  const { browserbear } = await startBear(t, ({ op }) => (op === 'tabs' ? [{ tabId: 7, url: 'https://example.com/', title: 'X', active: true, agent: true, bear: true }] : {}), { BROWSERBEAR_OP: OP });
   await assert.rejects(browserbear('fill', '7'), (e) => (assert.match(e.stderr, /fill only signs in in the agent's own Chrome/), true));
 });

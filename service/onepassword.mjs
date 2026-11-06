@@ -25,33 +25,62 @@ function op(args) {
       if (!e) return resolve(stdout);
       // op's own message says what went wrong (locked, dismissed, no item);
       // it never holds a secret.
-      const said = String(stderr || '').trim().split('\n').pop() || e.message;
+      // Only op's own [ERROR] line, never its stdout, which can hold values.
+      const said = (String(stderr || '').match(/\[ERROR\][^\n]*/) || [])[0]?.replace(/^\[ERROR\]\s*(\d{4}\/\d\d\/\d\d \d\d:\d\d:\d\d\s*)?/, '').slice(0, 200) || 'it failed (no reason given)';
       reject(new Error(e.killed ? `1Password didn't answer within ${OP_WAIT_MS / 1000} s (the Touch ID prompt may have gone unanswered)` : `1Password said: ${said}`));
     });
   });
 }
 
-const hostOf = (url) => {
+const urlOf = (href) => {
   try {
-    return new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+    return new URL(href);
   } catch {
-    return '';
+    return null;
   }
 };
+const hostOf = (href) => urlOf(href)?.hostname.replace(/^www\./, '').toLowerCase() || '';
 
-// accounts.google.com matches a login saved for google.com, and the other way.
+// Hosts where anyone can have a subdomain: a login saved for one of these
+// only goes to that exact host, never to a sibling or child.
+const SHARED_HOSTS = ['github.io', 'vercel.app', 'netlify.app', 'pages.dev', 'workers.dev', 'herokuapp.com', 'firebaseapp.com', 'web.app', 'appspot.com', 'azurewebsites.net', 'cloudfront.net', 'amazonaws.com', 'blogspot.com', 'glitch.me', 'onrender.com', 'fly.dev', 'ngrok-free.app', 'ngrok.io', 'convex.site', 'convex.cloud', 'repl.co', 'replit.app', 'surge.sh', 'wordpress.com', 'tumblr.com', 'myshopify.com'];
+const shared = (host) => SHARED_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+
+// The page's host is the login's, or a subdomain of it (accounts.google.com
+// for a login saved for google.com), and never the other way: a login saved
+// for login.example.com doesn't go to example.com. Not on shared hosting,
+// where a subdomain is someone else's (Codex review, 6 Nov).
 export function sameSite(pageHost, itemHost) {
   if (!pageHost || !itemHost) return false;
-  return pageHost === itemHost || pageHost.endsWith(`.${itemHost}`) || itemHost.endsWith(`.${pageHost}`);
+  if (pageHost === itemHost) return true;
+  return !shared(itemHost) && pageHost.endsWith(`.${itemHost}`);
 }
 
-/** The logins saved for the page's site, as { id, title, vault }. */
+// Only over HTTPS (or this Mac), whatever the login was saved with.
+const secure = (u) => u && (u.protocol === 'https:' || (u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname)));
+
+/** Whether this login may go to the page at href. */
+export function loginMatches(login, href) {
+  const page = urlOf(href);
+  return Boolean(secure(page)) && login.hosts.some((h) => sameSite(hostOf(href), h));
+}
+
+// op's JSON can hold secrets, so a parse error mustn't quote it.
+function parsed(text, what) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`1Password's answer for ${what} wasn't readable`);
+  }
+}
+
+/** The logins saved for the page's site, as { id, title, vault, hosts }. */
 export async function loginsFor(pageUrl) {
-  const page = hostOf(pageUrl);
-  const items = JSON.parse(await op(['item', 'list', '--categories', 'Login', '--format', 'json']));
+  if (!secure(urlOf(pageUrl))) throw new Error(`fill only signs in on https pages, not ${String(pageUrl).slice(0, 100)}`);
+  const items = parsed(await op(['item', 'list', '--categories', 'Login', '--format', 'json']), 'the list of logins');
   return items
-    .filter((it) => (it.urls || []).some((u) => sameSite(page, hostOf(u.href))))
-    .map((it) => ({ id: it.id, title: it.title, vault: it.vault?.name || '' }));
+    .map((it) => ({ id: it.id, title: it.title, vault: it.vault?.name || '', hosts: (it.urls || []).map((u) => hostOf(u.href)).filter(Boolean) }))
+    .filter((l) => loginMatches(l, pageUrl));
 }
 
 /** Pick one login: by title or id when given, else the only one. */
@@ -73,7 +102,7 @@ const listed = (logins) => logins.map((l) => `"${l.title}" (${l.id}${l.vault ? `
 
 /** The login's username and password, and its one-time code when asked and it has one. */
 export async function secretsFor(id, { otp = false } = {}) {
-  const item = JSON.parse(await op(['item', 'get', id, '--reveal', '--format', 'json']));
+  const item = parsed(await op(['item', 'get', id, '--reveal', '--format', 'json']), 'that login');
   const fields = item.fields || [];
   const by = (purpose) => fields.find((f) => f.purpose === purpose)?.value || '';
   const hasOtp = fields.some((f) => f.type === 'OTP');

@@ -11,9 +11,13 @@ const METHODS = new Set([
   'Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'Runtime.evaluate',
 ]);
 
-export function createPanel({ home, profiles, call, mark, popup = () => {}, dialog = () => null, clearDialog = () => {}, heartbeatMs = 10_000 }) {
+export function createPanel({ home, profiles: allProfiles, call, mark, popup = () => {}, dialog = () => null, clearDialog = () => {}, heartbeatMs = 10_000 }) {
   const file = path.join(home, 'panel-tabs.json');
   const agentOnly = () => fs.existsSync(path.join(home, 'agent-only'));
+  // With agent-only on, the panel sees no profile but the agent's Chrome:
+  // no rows, no viewers, no input for Mike's own tabs, even ones it showed
+  // before the switch went on (Codex review, 6 Nov).
+  const profiles = () => (agentOnly() ? allProfiles().filter(p => p.instance === 'agent-chrome') : allProfiles());
   let saved = [];
   try { saved = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
   // A CDP target identity prevents a reused Chrome tab number after a browser
@@ -93,7 +97,7 @@ export function createPanel({ home, profiles, call, mark, popup = () => {}, dial
     }));
     // Agent-only (Mike's trial): the panel offers none of his profiles, only
     // the agent's Chrome its pages already come from.
-    const own = agentOnly() ? [] : connected.filter(p => p.instance !== 'agent-chrome');
+    const own = connected.filter(p => p.instance !== 'agent-chrome');
     return { profiles: own.map(p => ({ id: p.instance, name: p.name, email: p.email, panelPopups: p.panelPopups === true })), tabs: rows.flat() };
   }
 
