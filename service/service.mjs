@@ -16,7 +16,7 @@ import { createMarks } from './marks.mjs';
 import { domainOf, looksLikeEmail, menuProfiles, openByEmail, openByMenu } from './chrome.mjs';
 import { RefMap, compact, diff, sameApartFromFocus } from './snapshot.mjs';
 import { createPanel } from './panel.mjs';
-import { loginMatches, loginsFor, pickLogin, secretsFor } from './onepassword.mjs';
+import { allowedFor, loginsFor, pickLogin, secretsFor } from './onepassword.mjs';
 import { tbPath, showBrowserPanel } from './threadbear.mjs';
 
 fs.mkdirSync(LOGS, { recursive: true, mode: 0o700 });
@@ -1583,11 +1583,10 @@ const commands = {
         if (!fields[which] || !value) continue;
         // Approving in 1Password takes a while; the tab may have gone
         // somewhere else meanwhile, and a login only goes to its own site.
-        const at = (await cdp(tab, 'Runtime.callFunctionOn', { objectId: fields[which], functionDeclaration: FOCUS_FIELD, returnByValue: true })).result?.value;
-        if (!at) throw new FillStopped(`the page changed before fill could type the ${label}`);
-        if (!loginMatches(login, at)) throw new FillStopped(`the tab is no longer on a site "${login.title}" is saved for`);
         backendIds.push((await cdp(tab, 'DOM.describeNode', { objectId: fields[which] })).node.backendNodeId);
-        await cdp(tab, 'Input.insertText', { text: value });
+        const put = (await cdp(tab, 'Runtime.callFunctionOn', { objectId: fields[which], functionDeclaration: PUT_FIELD, arguments: [{ value }, { value: allowedFor(login) }], returnByValue: true })).result?.value;
+        if (put === 'site') throw new FillStopped(`the tab is no longer on a site "${login.title}" is saved for`);
+        if (put !== 'ok') throw new FillStopped(`the page changed before fill could type the ${label}`);
         filled.push(label);
       }
     } catch (e) {
@@ -1595,7 +1594,12 @@ const commands = {
       // typed, so only fill's own words go back.
       throw e instanceof FillStopped ? new Error(`fill stopped: ${e.message}${filled.length ? ` (after the ${filled.join(', ')})` : ''}. Snap tab ${tab} to see where it is`) : new Error(`fill stopped in tab ${tab}${filled.length ? ` after the ${filled.join(', ')}` : ''}: the page changed or showed a dialog. Snap it to see where it is`);
     } finally {
-      if (backendIds.length) protectFilled(tab, frameTree.frame.loaderId, backendIds);
+      // The page as it is after typing: one that loaded in the meantime is
+      // the one holding the values.
+      if (backendIds.length) {
+        const loaderId = await cdp(tab, 'Page.getFrameTree').then((r) => r.frameTree.frame.loaderId, () => frameTree.frame.loaderId);
+        protectFilled(tab, loaderId, backendIds);
+      }
     }
     if (!filled.length) throw new Error(`"${login.title}" in 1Password has nothing for the fields on this page`);
     if (submit) {
@@ -1915,14 +1919,29 @@ const FIND_LOGIN_FIELDS = `function () {
   return { user: user || null, password: password || null, otp: otps[0] || null, splitCode: otps.length > 1 || otps.some((e) => e.maxLength === 1) };
 }`;
 
-// Focuses one field fill found, if it's still there and the page hasn't moved
-// on, and says where it is, so the caller can check the site once more right
-// before typing.
-const FOCUS_FIELD = `function () {
-  if (!this.isConnected || this.disabled || this.readOnly || !this.getClientRects().length) return null;
+// Types one value into one field fill found, in a single step in the page, so
+// nothing can run between checking where the tab is and typing: the field must
+// still be there, on a page whose host is one the login is saved for
+// (`allowed`: { host, sub, port }, from onepassword.mjs), over https. Goes in
+// as typing would (execCommand fires beforeinput and input), else by setting
+// the value and sending input and change, for pages that ignore it.
+const PUT_FIELD = `function (value, allowed) {
+  const host = location.hostname.replace(/^www\\./, '').toLowerCase();
+  const secure = location.protocol === 'https:' || (location.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(location.hostname));
+  const fits = allowed.some((a) => (host === a.host || (a.sub && host.endsWith('.' + a.host))) && location.port === a.port);
+  if (!secure || !fits) return 'site';
+  if (!this.isConnected || this.disabled || this.readOnly || !this.getClientRects().length) return 'gone';
   this.focus();
   if (this.select) this.select();
-  return document.activeElement === this && document.hasFocus() ? location.href : null;
+  if (document.activeElement !== this) return 'gone';
+  const typed = document.execCommand('insertText', false, value) && this.value === value;
+  if (!typed) {
+    const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(this), 'value')?.set;
+    if (set) set.call(this, value); else this.value = value;
+    this.dispatchEvent(new Event('input', { bubbles: true }));
+    this.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  return 'ok';
 }`;
 
 // Agent-only trial (Mike, 6 Nov 2026). While this file exists, agents keep

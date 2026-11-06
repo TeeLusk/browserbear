@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { startBear, root } from './harness.mjs';
-import { loginMatches, pickLogin, sameSite } from '../service/onepassword.mjs';
+import { allowedFor, loginMatches, pickLogin, sameSite } from '../service/onepassword.mjs';
 
 const OP = path.join(root, 'test', 'fakes', 'op.mjs');
 
@@ -15,9 +15,15 @@ test('which sites a login goes to', () => {
   assert.ok(!sameSite('notgoogle.com', 'google.com'));
   assert.ok(!sameSite('evil.github.io', 'github.io'));
   assert.ok(sameSite('mike.github.io', 'mike.github.io'));
-  const login = { hosts: ['example.com'] };
+  const login = { sites: [{ host: 'example.com', port: '' }] };
   assert.ok(loginMatches(login, 'https://example.com/login'));
+  assert.ok(loginMatches(login, 'https://accounts.example.com/login'));
   assert.ok(!loginMatches(login, 'http://example.com/login'));
+  assert.ok(!loginMatches(login, 'https://example.com:8443/login'));
+  assert.deepEqual(allowedFor({ sites: [{ host: 'mike.github.io', port: '' }, { host: 'example.com', port: '' }] }), [
+    { host: 'mike.github.io', sub: false, port: '' },
+    { host: 'example.com', sub: true, port: '' },
+  ]);
   const logins = [{ id: 'a', title: 'Work' }, { id: 'b', title: 'Home' }];
   assert.equal(pickLogin(logins, 'home', 'https://x.test').id, 'b');
   assert.throws(() => pickLogin(logins, undefined, 'https://x.test'), /2 logins for x\.test; say which with --item/);
@@ -41,9 +47,16 @@ function fakePage() {
       const node = (name) => ({ name, value: page.fields[name] ? { subtype: 'node', objectId: `el-${name}` } : { subtype: 'null' } });
       return { result: [node('user'), node('password'), node('otp'), { name: 'splitCode', value: { value: page.split } }] };
     }
-    if (method === 'Runtime.callFunctionOn') return { result: { value: page.at } };
+    if (method === 'Runtime.callFunctionOn' && params.arguments) {
+      // The page side of PUT_FIELD: checks where the tab is, then types.
+      const [value, allowed] = params.arguments.map((a) => a.value);
+      const u = new URL(page.at);
+      const host = u.hostname.replace(/^www\./, '');
+      if (u.protocol !== 'https:' || !allowed.some((a) => host === a.host || (a.sub && host.endsWith(`.${a.host}`)))) return { result: { value: 'site' } };
+      page.typed.push(value);
+      return { result: { value: 'ok' } };
+    }
     if (method === 'DOM.describeNode') return { node: { backendNodeId: 40 } };
-    if (method === 'Input.insertText') return page.typed.push(params.text), {};
     if (method === 'Accessibility.getFullAXTree') {
       return { nodes: [{ nodeId: '1', role: { value: 'RootWebArea' }, childIds: ['2'] }, { nodeId: '2', parentId: '1', role: { value: 'textbox' }, name: { value: 'Email' }, value: { value: 'user-bbb@example.com' }, backendDOMNodeId: 40 }] };
     }

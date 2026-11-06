@@ -59,10 +59,18 @@ export function sameSite(pageHost, itemHost) {
 // Only over HTTPS (or this Mac), whatever the login was saved with.
 const secure = (u) => u && (u.protocol === 'https:' || (u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname)));
 
+// A port has to match too: example.com:8443 can be someone else's service.
+const portOf = (u) => u?.port || '';
+
 /** Whether this login may go to the page at href. */
 export function loginMatches(login, href) {
   const page = urlOf(href);
-  return Boolean(secure(page)) && login.hosts.some((h) => sameSite(hostOf(href), h));
+  return Boolean(secure(page)) && login.sites.some((s) => sameSite(hostOf(href), s.host) && portOf(page) === s.port);
+}
+
+/** The same rule, as data for the check fill runs inside the page. */
+export function allowedFor(login) {
+  return login.sites.map((s) => ({ host: s.host, sub: !shared(s.host), port: s.port }));
 }
 
 // op's JSON can hold secrets, so a parse error mustn't quote it.
@@ -74,12 +82,17 @@ function parsed(text, what) {
   }
 }
 
-/** The logins saved for the page's site, as { id, title, vault, hosts }. */
+/** The logins saved for the page's site, as { id, title, vault, sites: [{ host, port }] }. */
 export async function loginsFor(pageUrl) {
   if (!secure(urlOf(pageUrl))) throw new Error(`fill only signs in on https pages, not ${String(pageUrl).slice(0, 100)}`);
   const items = parsed(await op(['item', 'list', '--categories', 'Login', '--format', 'json']), 'the list of logins');
   return items
-    .map((it) => ({ id: it.id, title: it.title, vault: it.vault?.name || '', hosts: (it.urls || []).map((u) => hostOf(u.href)).filter(Boolean) }))
+    .map((it) => ({
+      id: it.id,
+      title: it.title,
+      vault: it.vault?.name || '',
+      sites: (it.urls || []).map((u) => ({ host: hostOf(u.href), port: portOf(urlOf(u.href)) })).filter((x) => x.host),
+    }))
     .filter((l) => loginMatches(l, pageUrl));
 }
 
