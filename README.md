@@ -163,15 +163,15 @@ browserbear type 1234 e7 "Hello" --submit
 browserbear upload 1234 e12 ~/talk.mp3         # e12 can be the "Choose files" button
 browserbear read 1234                          # page text; long pages go to a file
 browserbear shot 1234                          # prints the PNG path
-browserbear handoff 1234                       # your turn: the thread's Browser panel
+browserbear handoff 1234                       # your turn: the tab comes forward in your Chrome
 browserbear handoff 1234 --wait                # ...and the agent carries on by itself when you've finished
 ```
 
 Agents work in a window of BrowserBear's own, so they never take over the tab
 you're looking at. When an agent needs you to do something in one of its tabs
-(sign in, pay, approve), `handoff` opens the thread's Browser panel in Threadbear.
-When Threadbear isn't available or can't show the page, it moves the tab into
-the Chrome window you last used and brings it to the front. `open` and `goto` say so when a page looks like
+(sign in, pay, approve), `handoff` moves the tab into the Chrome window you
+last used and brings it to the front. `browserbear handoff-in panel` shows it in
+the thread's Browser panel in Threadbear instead (`handoff-in chrome` goes back). `open` and `goto` say so when a page looks like
 a sign-in. Given a URL, `handoff` finds the agent tab on that page; Threadbear
 does that when you click a link an agent gave you, so you don't end up with
 two tabs of the same sign-in.
