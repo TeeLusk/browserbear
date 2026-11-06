@@ -23,6 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { HOME, SOCKET, line, lineReader } from '../service/wire.mjs';
+import { findSheets, onScreen, placeOn, sitsOn, watchWindows } from './sheets.mjs';
 
 export const DIR = path.join(HOME, 'agent');
 const PROFILE = path.join(DIR, 'chrome-profile');
@@ -167,6 +168,7 @@ function track(info) {
       tab.popup = true;
     }
   }
+  if (tab.url !== info.url) tab.activeAt = Date.now();
   tab.url = info.url;
   tab.title = info.title;
   return tab;
@@ -190,7 +192,7 @@ let writing = null;
 function writeState() {
   writing ||= setTimeout(() => {
     writing = null;
-    const tabs = [...known.values()].map(({ tabId, targetId, url, title, thread, mark, status, handoffs, openedAt, popup }) => ({
+    const tabs = [...known.values()].map(({ tabId, targetId, url, title, thread, mark, status, handoffs, openedAt, popup, sheet }) => ({
       tabId,
       targetId,
       url,
@@ -203,6 +205,10 @@ function writeState() {
       handoffs,
       openedAt,
       popup: !!popup,
+      // Chrome has a window of its own up over this page (a passkey, say),
+      // which the panel's picture can't show: `moved` when it's been brought
+      // onto Mike's screen for him.
+      sheet: sheet ? { moved: !!sheet.moved, since: sheet.since } : null,
     }));
     const tmp = `${STATE}.${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify({ port: PORT, socket: SOCKET, pid: process.pid, chromePid, tabs }));
@@ -295,6 +301,7 @@ function onEvent(m) {
   const tab = targetId && known.get(byTarget.get(targetId));
   if (!tab) return;
   if (method === 'Page.frameStartedLoading' && params.frameId === tab.mainFrame) {
+    tab.activeAt = Date.now();
     tab.status = 'loading';
     writeState();
   }
@@ -373,7 +380,9 @@ const ops = {
   },
 
   async cdp({ tabId, method, params }) {
-    return browserCall(method, params || {}, await sessionFor(tabOf(tabId)));
+    const tab = tabOf(tabId);
+    tab.activeAt = Date.now();
+    return browserCall(method, params || {}, await sessionFor(tab));
   },
 
   // The panel draws these. Nothing goes in the page, so a site can't see it.
@@ -395,6 +404,110 @@ const ops = {
     throw new Error("download isn't in the agent's Chrome yet: use a link click, which lands in its Downloads folder");
   },
 };
+
+// ---- Chrome's own windows ----
+// See sheets.mjs. A window that's there for two looks in a row counts, so a
+// menu or a bubble that comes and goes as the agent types doesn't drag a
+// window onto Mike's screen.
+
+const sheetLooks = new Map(); // tabId -> { seen, gone }
+// Sheet window id -> tabs it was matched to but didn't follow when moved.
+const wrongTabs = new Map();
+
+async function lookForSheets({ windows, screens, focus }) {
+  const tabWindows = [];
+  for (const tab of known.values()) {
+    const w = await browserCall('Browser.getWindowForTarget', { targetId: tab.targetId }, undefined, 5_000).catch(() => null);
+    if (w) tabWindows.push({ tabId: tab.tabId, windowId: w.windowId, bounds: w.bounds, thread: tab.thread, activeAt: tab.activeAt });
+  }
+  // A sheet stays with the tab it was first seen over, so it can't be handed
+  // to another window parked nearby while its own is being moved.
+  const claimed = new Map([...known.values()].filter((t) => t.sheet).map((t) => [t.sheet.windowId, t.tabId]));
+  for (const id of wrongTabs.keys()) if (!windows.some((w) => w.id === id)) wrongTabs.delete(id);
+  const sheets = findSheets(windows, tabWindows, screens, claimed, wrongTabs);
+  for (const t of tabWindows) {
+    const tab = known.get(t.tabId);
+    if (!tab) continue;
+    const look = sheetLooks.get(t.tabId) ?? { seen: 0, gone: 0, strays: 0 };
+    sheetLooks.set(t.tabId, look);
+    if (!sheets.has(t.tabId)) {
+      look.seen = 0;
+      if (tab.sheet && ++look.gone >= 2) await sheetClosed(tab, t, look);
+      continue;
+    }
+    look.gone = 0;
+    const sheet = sheets.get(t.tabId);
+    if (tab.sheet?.moved) {
+      // A sheet follows its own window, so one that's stayed put after two
+      // looks belongs to another page parked in the same corner: put this
+      // one back and let the next look match it again without it.
+      if (sitsOn(sheet, t.bounds)) tab.sheet.checked = true;
+      else if (!tab.sheet.checked && ++look.strays >= 2) {
+        log('sheet', sheet.id, "didn't follow tab", tab.tabId);
+        if (!wrongTabs.has(sheet.id)) wrongTabs.set(sheet.id, new Set());
+        wrongTabs.get(sheet.id).add(tab.tabId);
+        await sheetClosed(tab, t, look);
+      }
+      continue;
+    }
+    if (tab.sheet || ++look.seen < 2) continue;
+    tab.sheet = { since: Date.now(), moved: null, windowId: sheet.id };
+    log('sheet over tab', tab.tabId, JSON.stringify(sheet));
+    // Its window is already where Mike can see it (the panel's "show the real
+    // window"), so leave it be.
+    if (onScreen(t.bounds, screens) < 0.5) {
+      // Full size: Chrome cuts a parked window's height down to what fits
+      // (375 points on Tinker Desk), and the sheet's taller than that.
+      const to = placeOn(focus, { width: WIDTH, height: HEIGHT });
+      const ok = await browserCall('Browser.setWindowBounds', { windowId: t.windowId, bounds: to }).then(
+        () => true,
+        (e) => log('sheet move failed', e.message),
+      );
+      // Not moved: try again on the next looks rather than say it's there.
+      if (!ok) {
+        tab.sheet = null;
+        look.seen = 0;
+        continue;
+      }
+      tab.sheet.moved = to;
+      look.strays = 0;
+      log('brought tab', tab.tabId, 'to', JSON.stringify(to));
+    }
+    writeState();
+  }
+  for (const tabId of sheetLooks.keys()) if (!known.has(tabId)) sheetLooks.delete(tabId);
+}
+
+async function sheetClosed(tab, t, look) {
+  const moved = tab.sheet.moved;
+  tab.sheet = null;
+  look.gone = 0;
+  look.strays = 0;
+  log('sheet gone from tab', tab.tabId);
+  // Back off screen, unless Mike's moved it since, or asked for it with the
+  // panel's button, in which case it's where he wants it.
+  if (moved && Math.abs(t.bounds.left - moved.left) <= 2 && Math.abs(t.bounds.top - moved.top) <= 2) {
+    await browserCall('Browser.setWindowBounds', { windowId: t.windowId, bounds: PARK }).catch((e) => log('park failed', e.message));
+  }
+  writeState();
+}
+
+function watchSheets() {
+  if (!chromePid) return log('no Chrome pid, so no sheet watch');
+  let busy = false;
+  watchWindows(
+    chromePid,
+    (look) => {
+      // A slow CDP answer skips a look rather than stacking them up.
+      if (busy) return;
+      busy = true;
+      lookForSheets(look)
+        .catch((e) => log('sheet look failed', e.message))
+        .finally(() => (busy = false));
+    },
+    { log },
+  );
+}
 
 // ---- The service ----
 
@@ -440,4 +553,5 @@ targetInfos.forEach(track);
 // open and empty, as Chrome would quit with its last window.
 await Promise.all(targetInfos.filter(isTab).map((t) => park(t.targetId).catch((e) => log('park failed', e.message))));
 writeState();
+watchSheets();
 connectService();

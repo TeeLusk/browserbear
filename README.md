@@ -80,6 +80,14 @@ screen where about 40 points of it show. Threadbear's Browser panel draws the th
 sends your mouse and keys to them, and `handoff` opens that panel, so nothing comes to the front.
 You sign in once per account, in the panel, and those sign-ins stay in that folder.
 
+Chrome's own windows over a page (the passkey sheet, a permission prompt, the password
+manager) aren't in the panel's picture, and Chrome keeps them on a screen even with
+their page's window parked, so one used to turn up hanging off the edge of a monitor.
+The host watches the window server for them (`agent/sheets.mjs`, a few milliseconds a
+look, no Screen Recording needed), brings the page's window to the middle of the screen
+you're using, with the sheet on it, and parks it again once the sheet closes. It sets
+`sheet` on the tab in `agent/tabs.json` meanwhile, and Threadbear's panel says so.
+
 Tried on 5 Nov 2026: Google's sign-in takes this, with scripted input and the port
 open. It rejects CEF and headless Chrome with "This browser or app may not be secure".
 Chrome stops drawing a minimised window, a hidden app and a background tab (0 frames
