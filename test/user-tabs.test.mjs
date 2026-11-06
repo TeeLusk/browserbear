@@ -107,3 +107,28 @@ test("close, goto and the like refuse the user's own tabs; looking doesn't mark 
   await fails(browserbear('close', '10'), /tab 10 is one BrowserBear can't place .*--user-tab/s);
   assert.ok(!closed.includes(10));
 });
+
+// On 6 Nov a tab an agent had opened stopped counting as the agent's partway
+// through its job (an extension reload had made the extension forget its own
+// window), and every refusal said no agent had ever opened it. However a tab
+// leaves BrowserBear's window without a handoff, the refusal says what happened.
+test("a tab an agent opened that has left BrowserBear's window says so when refused", async (t) => {
+  let inBearWindow = true;
+  const { browserbear } = await startBear(t, ({ op, args }) => {
+    const tab = { tabId: 20, url: 'https://dashboard.example/usage', title: 'Usage', active: true, agent: inBearWindow, bear: inBearWindow };
+    if (op === 'tabs') return [tab];
+    if (op === 'open') return tab;
+    if (op === 'cdp') return { nodes: [{ nodeId: '1', role: { value: 'RootWebArea' } }] };
+    return true;
+  });
+  const fails = (p, re) => assert.rejects(p, (e) => (assert.match(e.stderr, re), true));
+
+  assert.equal(await browserbear('open', 'https://dashboard.example/usage', '--id'), '20');
+  await browserbear('cdp', '20', 'Page.reload');
+
+  inBearWindow = false; // dragged into the user's own window
+  await fails(browserbear('cdp', '20', 'Page.reload'), /tab 20 .*Usage.* was opened by an agent, but it has left BrowserBear's window without a handoff.*won't cdp in it.*browserbear claim 20/s);
+  await fails(browserbear('close', '20'), /was opened by an agent.*won't close it.*browserbear close 20 --user-tab/s);
+  assert.doesNotMatch(await browserbear('claim', '20').catch((e) => e.stderr), /won't/);
+  await browserbear('cdp', '20', 'Page.reload');
+});

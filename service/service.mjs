@@ -277,7 +277,12 @@ async function whose(tabId) {
   if (!t) throw Object.assign(new Error(closedMessage(tabId)), { closed: true });
   if (handed.has(tabId)) return { who: 'handed', t, p };
   if (t.agent === undefined) return { who: bearTabs.has(tabId) ? 'agent' : null, t, p };
-  if (t.bear !== false) return { who: 'agent', t, p };
+  if (t.bear !== false) {
+    // Relearnt here, as a restarted service starts knowing none, so a tab
+    // dragged out later can still be told apart from one no agent opened.
+    if (t.bear) bearTabs.add(tabId);
+    return { who: 'agent', t, p };
+  }
   if (t.agent) return { who: 'handed', t, p };
   if (claimed.has(tabId)) return { who: 'claimed', t, p };
   if (panelPopups.has(tabId)) return { who: 'agent', t, p };
@@ -287,7 +292,10 @@ async function whose(tabId) {
     at = tabs.find((x) => x.tabId === at.openerTabId);
     if (at && at.bear && !handed.has(at.tabId)) return { who: 'agent', t, p };
   }
-  return { who: 'user', t, p };
+  // One an agent opened in BrowserBear's window that isn't there now, without
+  // a handoff: the user dragged it into a window of their own, so it's theirs,
+  // but the refusal mustn't say no agent ever opened it.
+  return { who: 'user', left: bearTabs.has(tabId), t, p };
 }
 
 // Commands that change a page. Looking (snap, read, shot, eval, show) stays
@@ -296,8 +304,14 @@ async function whose(tabId) {
 const ACTS = new Set(['click', 'type', 'key', 'goto', 'upload', 'dialog', 'cdp']);
 const NOT_YOURS = "If you meant a tab you opened, use the id browserbear open printed (open --id prints only that), not a match from browserbear tabs.";
 
-function refuseUserTab(cmd, tabId, { who, t }) {
+function refuseUserTab(cmd, tabId, { who, left, t }) {
   const page = `"${t.title.slice(0, 60)}" <${t.url.slice(0, 100)}>`;
+  if (left) {
+    return new Error(
+      `tab ${tabId} (${page}) was opened by an agent, but it has left BrowserBear's window without a handoff (the user may have dragged it into one of their own windows), so it counts as theirs now and BrowserBear won't ${cmd} ${cmd === 'close' ? 'it' : 'in it'}. snap, read, shot and eval can still look at it. ` +
+        `If the user hasn't taken it over and you should carry on in it: browserbear claim ${tabId}${cmd === 'close' ? `, or browserbear close ${tabId} --user-tab` : ', or add --user-tab'}`,
+    );
+  }
   if (cmd === 'close') {
     const whose = who === 'handed'
       ? "one an agent handed to the user, so it's theirs now"

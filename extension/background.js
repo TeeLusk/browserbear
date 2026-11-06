@@ -21,6 +21,66 @@ const attached = new Map(); // tabId -> idle-detach timer
 // flicker between "checking" and "missing".
 const link = { host: 'connecting', error: null, service: false, profile: null };
 
+// Which window is BrowserBear's, which is yours, and which tabs were handed
+// over live in chrome.storage.session, which forgets everything when the
+// extension reloads (browserbear reload, an update), not only when Chrome
+// quits. On 6 Nov another thread's reload landed partway through an agent's
+// job on the Convex dashboard: the extension forgot its own window, so the
+// tab the agent had opened there counted as Mike's and every click after it
+// was refused. So they're copied to local storage as they change and put back
+// when the worker starts with none. Window and tab ids only mean something
+// until Chrome quits, so a new Chrome session drops them, and anything that
+// has since gone is left out. Known gap: an extension disabled across a
+// Chrome restart misses onStartup, so if Chrome reused the old window's id
+// for one of yours, that window would count as BrowserBear's until it closes.
+// Rare enough, and this only guards against agents' mistakes.
+const KEPT = ['bearWindow', 'userWindow', 'handedOff'];
+
+// Only what the session holds when the copy runs: these are never taken out of
+// the session while they still mean something, so a wipe mustn't be copied
+// too, nor a value forgetLastRun has dropped since it changed.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'session' || !KEPT.some((k) => changes[k]?.newValue !== undefined)) return;
+  queue(async () => {
+    const { kept = {} } = await chrome.storage.local.get('kept');
+    await chrome.storage.local.set({ kept: { ...kept, ...(await chrome.storage.session.get(KEPT)) } });
+  });
+});
+
+async function restoreKept() {
+  if (Object.keys(await chrome.storage.session.get(KEPT)).length) return {};
+  const { kept } = await chrome.storage.local.get('kept');
+  if (!kept) return;
+  const back = {};
+  for (const k of ['bearWindow', 'userWindow']) {
+    if (kept[k] && (await chrome.windows.get(kept[k]).catch(() => null))) back[k] = kept[k];
+  }
+  const open = new Set((await chrome.tabs.query({})).map((t) => t.id));
+  const handedOff = (kept.handedOff || []).filter((id) => open.has(id));
+  if (handedOff.length) back.handedOff = handedOff;
+  if (Object.keys(back).length) await chrome.storage.session.set(back);
+  return back;
+}
+
+// Ops and the focus listener wait for this, so none of them reads an empty
+// session in the moment after a reload. Writes to the copy queue on it too, so
+// two quick changes can't each overwrite the other.
+const putBack = restoreKept().catch((e) => console.warn('browserbear: cannot restore state', e));
+let restored = putBack;
+const queue = (job) => (restored = restored.then(job).catch((e) => console.warn('browserbear: cannot keep state', e)));
+
+// Chrome just started, so what was put back (back) is from its last run, and
+// its ids may now belong to the user's windows and tabs. Only that goes: an
+// agent may already have opened a tab this time.
+async function forgetLastRun(back) {
+  const now = await chrome.storage.session.get(KEPT);
+  const stale = Object.keys(back).filter((k) => JSON.stringify(now[k]) === JSON.stringify(back[k]));
+  for (const k of stale) delete now[k];
+  await chrome.storage.session.remove(stale);
+  await chrome.storage.local.set({ kept: now });
+}
+chrome.runtime.onStartup.addListener(() => queue(async () => forgetLastRun((await putBack) || {})));
+
 function connect() {
   if (port) return;
   port = chrome.runtime.connectNative(HOST);
@@ -74,6 +134,7 @@ async function onMessage(msg) {
   const handler = ops[msg.op];
   try {
     if (!handler) throw new Error(`unknown op ${msg.op}`);
+    await restored;
     post({ id: msg.id, ok: true, result: await handler(msg.args || {}) });
   } catch (e) {
     post({ id: msg.id, ok: false, error: String(e?.message || e) });
@@ -117,6 +178,7 @@ const tabInfo = (t) => ({
 // the listener below wakes it for each focus change.
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  await restored;
   const { bearWindow } = await chrome.storage.session.get('bearWindow');
   if (windowId === bearWindow) return;
   const win = await chrome.windows.get(windowId).catch(() => null);
