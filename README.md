@@ -106,8 +106,10 @@ Frames remain in memory on this Mac.
 
 The native-window button pauses capture for Chrome's passkeys, password managers
 and other native UI. Returning to the panel is explicit; Chrome's debugger Stop
-is respected until Reconnect. Existing-profile frames use sequential screenshots
-with backpressure rather than the separate agent Chrome's 60 fps screencast.
+is respected until Reconnect. Existing-profile frames come from Chrome's own
+screencast through the extension (0.3.7 and later), up to 60 a second, each acked
+once the panel has taken it. Screenshots fill in when the cast goes quiet, and
+older extensions use screenshots only, which manage 6 to 8 frames a second.
 Viewport changes wait for a capture to finish, while input and dialog answers
 can pass it. Extension 0.3.6 also preserves Chrome's exact opener tab ID, so popups
 join the correct thread. Older extensions open new windows in Chrome; the
@@ -200,7 +202,7 @@ agent is doing, with Open thread (in the Threadbear app, or its website without 
 come off when the thread finishes its turn without needing you. The CLI passes
 `THREADBEAR_THREAD_ID` along and the service asks Threadbear's `tb` for the
 thread's name and state; outside Threadbear the tab just says "agent". The
-pill steps aside while the agent clicks or takes a screenshot, and agents see
+pill steps aside while the agent clicks or takes a screenshot, and while the Browser panel streams the tab, and agents see
 the page's own title.
 
 Uploads never open Chrome's file picker. Give `upload` the file input itself
