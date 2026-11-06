@@ -32,9 +32,10 @@ function op(args) {
   });
 }
 
+// 1Password often keeps a site as just "x.com", with no scheme.
 const urlOf = (href) => {
   try {
-    return new URL(href);
+    return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(href) ? href : `https://${href}`);
   } catch {
     return null;
   }

@@ -20,6 +20,8 @@ test('which sites a login goes to', () => {
   assert.ok(loginMatches(login, 'https://accounts.example.com/login'));
   assert.ok(!loginMatches(login, 'http://example.com/login'));
   assert.ok(!loginMatches(login, 'https://example.com:8443/login'));
+  // Saved without a scheme, the way 1Password often keeps them.
+  assert.ok(loginMatches({ sites: [{ host: 'x.com', port: '' }] }, 'https://x.com/i/flow/login'));
   assert.deepEqual(allowedFor({ sites: [{ host: 'mike.github.io', port: '' }, { host: 'example.com', port: '' }] }), [
     { host: 'mike.github.io', sub: false, port: '' },
     { host: 'example.com', sub: true, port: '' },
