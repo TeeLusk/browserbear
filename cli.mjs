@@ -2,6 +2,7 @@
 // browserbear: drive your real Chrome profiles from the command line, through the
 // BrowserBear service. Every command that changes a page prints what changed, so an
 // agent rarely needs a separate look.
+import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -54,6 +55,8 @@ and eval. click, type, key, goto, upload and dialog need claim first, or --user-
 user asked for work in that tab. close refuses them unless --user-tab, so only when they asked for it.
   browserbear reload [--profile p]              reload the extension after changing it (all profiles by default)
   browserbear status
+  browserbear agent-only [on|off]               keep agents to the agent's own Chrome (shown in Threadbear's Browser
+                                                panel) and refuse the user's own profiles. Off unless turned on
 
 A profile is its whole Chrome name, email or folder, in any case: "Work", "you@company.com", "Default",
 "Profile 2". Part of a name doesn't count: you get the candidates back, and an error if two profiles share it.
@@ -210,7 +213,23 @@ if (args && flags['user-tab']) args.userTab = true;
 // the right one. The service always starts with "opened tab <id>", even when
 // the page went wrong after it opened.
 const openedId = (text) => /^opened tab (\d+)/.exec(text)?.[1];
-if (!args) {
+// A switch file the service checks on every command, so it works whether or
+// not the service is running (Mike's agent-only trial, 6 Nov 2026).
+const AGENT_ONLY = path.join(HOME, 'agent-only');
+if (cmd === 'agent-only') {
+  const want = pos[0];
+  if (want === 'on') fs.mkdirSync(HOME, { recursive: true }), fs.writeFileSync(AGENT_ONLY, `turned on ${new Date().toISOString()}\n`);
+  else if (want === 'off') fs.rmSync(AGENT_ONLY, { force: true });
+  else if (want !== undefined) {
+    console.error('browserbear: agent-only takes on or off');
+    process.exitCode = 1;
+  }
+  if (!process.exitCode) {
+    console.log(fs.existsSync(AGENT_ONLY)
+      ? "agent-only is on: agents use only the agent's own Chrome (--profile agent); the user's profiles are refused"
+      : "agent-only is off: agents can use the user's connected profiles");
+  }
+} else if (!args) {
   console.log(USAGE);
   process.exitCode = cmd && cmd !== 'help' ? 1 : 0;
 } else {

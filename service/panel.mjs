@@ -13,6 +13,7 @@ const METHODS = new Set([
 
 export function createPanel({ home, profiles, call, mark, popup = () => {}, dialog = () => null, clearDialog = () => {}, heartbeatMs = 10_000 }) {
   const file = path.join(home, 'panel-tabs.json');
+  const agentOnly = () => fs.existsSync(path.join(home, 'agent-only'));
   let saved = [];
   try { saved = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
   // A CDP target identity prevents a reused Chrome tab number after a browser
@@ -90,7 +91,10 @@ export function createPanel({ home, profiles, call, mark, popup = () => {}, dial
       }
       return out;
     }));
-    return { profiles: connected.filter(p => p.instance !== 'agent-chrome').map(p => ({ id: p.instance, name: p.name, email: p.email, panelPopups: p.panelPopups === true })), tabs: rows.flat() };
+    // Agent-only (Mike's trial): the panel offers none of his profiles, only
+    // the agent's Chrome its pages already come from.
+    const own = agentOnly() ? [] : connected.filter(p => p.instance !== 'agent-chrome');
+    return { profiles: own.map(p => ({ id: p.instance, name: p.name, email: p.email, panelPopups: p.panelPopups === true })), tabs: rows.flat() };
   }
 
   async function reset(v, answered = Promise.resolve()) {

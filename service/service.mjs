@@ -1793,6 +1793,32 @@ async function hostsReady() {
   await sleep(Math.max(0, 1_000 - (Date.now() - startedAt)));
 }
 
+// Agent-only trial (Mike, 6 Nov 2026). While this file exists, agents keep
+// to the agent's own Chrome, whose pages show in Threadbear's Browser panel,
+// and Mike's own profiles are refused with what to do instead. He's trying it
+// on his Mac before it goes to anyone else, so it's off unless the file is
+// there: `browserbear agent-only on|off`.
+const AGENT_ONLY = path.join(HOME, 'agent-only');
+const AGENT_INSTANCE = 'agent-chrome';
+const PROFILE_CMDS = new Set(['open', 'tabs', 'claim']);
+function agentOnlyRefusal(what) {
+  return new Error(
+    `BrowserBear is agent-only on this Mac (Mike's trial), so ${what}. Use --profile agent: its pages show in Threadbear's Browser panel. ` +
+      `If a page needs a sign-in, open it in the agent's Chrome and run browserbear handoff <tab> --wait, so Mike signs in there once and it stays signed in. Don't send him to his own Chrome.`,
+  );
+}
+async function keepToAgentChrome(cmd, args) {
+  if (PROFILE_CMDS.has(cmd)) {
+    if (!args.profile) args.profile = 'agent';
+    else if (String(args.profile).toLowerCase() !== 'agent') throw agentOnlyRefusal(`it won't use the profile "${args.profile}"`);
+  }
+  // A tab given by id has to be in the agent's Chrome too. handoff also takes
+  // a URL, which it only ever matches to a tab an agent opened.
+  if (typeof args.tab === 'number' && (await ownerOf(args.tab)).instance !== AGENT_INSTANCE) {
+    throw agentOnlyRefusal(`it won't work in tab ${args.tab}, which is in one of Mike's own profiles`);
+  }
+}
+
 async function onClientMessage(conn, msg) {
   const fn = commands[msg.cmd];
   let using = null; // the tab this command works in, for its marks
@@ -1807,6 +1833,7 @@ async function onClientMessage(conn, msg) {
     const args = { ...(msg.args || {}), thread: msg.thread };
     // Left as text when it isn't a number: handoff also takes a URL.
     if (/^\d+$/.test(String(args.tab))) args.tab = Number(args.tab);
+    if (fs.existsSync(AGENT_ONLY) && !['status', 'profiles', 'reload'].includes(msg.cmd)) await keepToAgentChrome(msg.cmd, args);
     if (typeof args.tab === 'number' && (USES[msg.cmd] || msg.cmd === 'close')) {
       const owner = await whose(args.tab);
       // Only a tab known to be an agent's closes without asking. Commands that
