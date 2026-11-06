@@ -46,6 +46,8 @@ const HANDED = path.join(HOME, 'handed.json');
 // because ownerOf and remember check it.
 const AGENT_ONLY = path.join(HOME, 'agent-only');
 const AGENT_INSTANCE = 'agent-chrome';
+// Opt-in: handoffs of the user's own tabs go to Threadbear's Browser panel.
+const PANEL_HANDOFFS = path.join(HOME, 'handoff-in-panel');
 function agentOnlyOn() {
   return fs.existsSync(AGENT_ONLY);
 }
@@ -1723,8 +1725,13 @@ const commands = {
     const tabId = typeof tab === 'number' ? tab : await agentTabFor(tab);
     const p = await ownerOf(tabId);
     panel.remember(tabId, thread, p.instance);
-    const requested = thread && tbPath() && await panel.prepareHandoff(tabId, p.instance) ? await showBrowserPanel(thread) : null;
-    const inPanel = Boolean(requested) || panel.hasViewer(tabId, p.instance);
+    // A tab in the user's own Chrome comes forward in their Chrome window, as
+    // it did before 5 Nov: Mike preferred that to its picture in Threadbear's
+    // Browser panel (6 Nov). `browserbear handoff-in panel` opts back in. The
+    // agent's own Chrome has no window of the user's, so it always uses the panel.
+    const usePanel = p.instance === AGENT_INSTANCE || fs.existsSync(PANEL_HANDOFFS);
+    const requested = usePanel && thread && tbPath() && await panel.prepareHandoff(tabId, p.instance) ? await showBrowserPanel(thread) : null;
+    const inPanel = Boolean(requested) || (usePanel && panel.hasViewer(tabId, p.instance));
     panel.handedOff(tabId, p.instance, !inPanel);
     setHanded(tabId, true);
     const t = await (inPanel ? tabNow(tabId) : call(p, 'handoff', { tabId })).catch((e) => {

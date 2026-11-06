@@ -6,7 +6,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { startBear } from './harness.mjs';
 
-async function setup(t, { available = true, restricted = false } = {}) {
+async function setup(t, { available = true, restricted = false, inPanel = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'panel-handoff-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const fake = path.join(dir, 'tb.mjs');
@@ -33,6 +33,8 @@ else console.log('');
     }
     throw new Error(`unexpected ${op}`);
   }, { BROWSERBEAR_TB: fake, THREADBEAR_THREAD_ID: 'thread-one' });
+  // Panel handoffs of the user's own tabs are opt-in since 6 Nov.
+  if (inPanel) fs.writeFileSync(path.join(bear.home, 'handoff-in-panel'), '');
   const rpc = (cmd, args = {}) => new Promise((resolve, reject) => {
     const conn = net.createConnection(path.join(bear.home, 'browserbear.sock'));
     let buffer = '';
@@ -56,6 +58,13 @@ test('handoff queues the Browser panel without an existing viewer or a Chrome fo
   const state = await b.rpc('panelState');
   assert.equal(state.tabs[0].inChrome, false);
   assert.equal(state.tabs[0].state, 'yours');
+});
+
+test("by default handoff brings the user's own tab forward in their Chrome, not the panel", async t => {
+  const b = await setup(t, { inPanel: false });
+  assert.match(await b.browserbear('handoff', '8'), /own Chrome window/);
+  assert.equal(b.focused(), 1);
+  assert.deepEqual(b.requests(), []);
 });
 
 for (const options of [{ available: false }, { restricted: true }]) {

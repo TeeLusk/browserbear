@@ -34,9 +34,9 @@ const USAGE = `browserbear: let agents use your real Chrome profiles
   browserbear dialog <tab> accept|dismiss [text]
   browserbear show <tab>                        bring a tab forward in its window (real clicks need it)
   browserbear handoff <tab|url>                 before asking the user to do something in a tab (sign in,
-                                                pay, approve): opens this thread's Browser panel in Threadbear,
-                                                now or when they next open the thread. Chrome's own window
-                                                is the fallback. A URL finds the agent tab on that page.
+                                                pay, approve): brings the tab forward in their own Chrome window
+                                                (handoff-in panel: this thread's Browser panel in Threadbear
+                                                instead). A URL finds the agent tab on that page.
   browserbear handoff <tab|url> --wait [--until-url <glob>] [--until-text <text>] [--timeout <seconds>]
                                                 the same, then waits until they've finished and prints where the
                                                 tab ended up, so they needn't reply "done". Run it as a background
@@ -60,6 +60,8 @@ user asked for work in that tab. close refuses them unless --user-tab, so only w
                                                 of username, password and one-time code the page asks for now
                                                 (run it again on the next step). The user approves with Touch ID;
                                                 you never see the values. No login saved: handoff instead
+  browserbear handoff-in [chrome|panel]         where handoff puts the user's own tabs: their Chrome window
+                                                (default) or Threadbear's Browser panel
   browserbear agent-only [on|off]               keep agents to the agent's own Chrome (shown in Threadbear's Browser
                                                 panel) and refuse the user's own profiles. Off unless turned on
 
@@ -220,10 +222,25 @@ if (args && flags['user-tab']) args.userTab = true;
 // the right one. The service always starts with "opened tab <id>", even when
 // the page went wrong after it opened.
 const openedId = (text) => /^opened tab (\d+)/.exec(text)?.[1];
+// Where handoff sends the user's own tabs: their Chrome window (the default)
+// or Threadbear's Browser panel. A file the service checks each handoff.
+const HANDOFF_IN_PANEL = path.join(HOME, 'handoff-in-panel');
+if (cmd === 'handoff-in') {
+  const want = pos[0];
+  if (want === 'panel') fs.mkdirSync(HOME, { recursive: true }), fs.writeFileSync(HANDOFF_IN_PANEL, `set ${new Date().toISOString()}\n`);
+  else if (want === 'chrome') fs.rmSync(HANDOFF_IN_PANEL, { force: true });
+  else if (want !== undefined) {
+    console.error('browserbear: handoff-in takes chrome or panel');
+    process.exitCode = 1;
+  }
+  if (!process.exitCode) console.log(fs.existsSync(HANDOFF_IN_PANEL) ? "handoffs of the user's own tabs open in Threadbear's Browser panel" : "handoffs of the user's own tabs come forward in their Chrome window");
+}
 // A switch file the service checks on every command, so it works whether or
 // not the service is running (Mike's agent-only trial, 6 Nov 2026).
 const AGENT_ONLY = path.join(HOME, 'agent-only');
-if (cmd === 'agent-only') {
+if (cmd === 'handoff-in') {
+  // handled above
+} else if (cmd === 'agent-only') {
   const want = pos[0];
   if (want === 'on') fs.mkdirSync(HOME, { recursive: true }), fs.writeFileSync(AGENT_ONLY, `turned on ${new Date().toISOString()}\n`);
   else if (want === 'off') fs.rmSync(AGENT_ONLY, { force: true });
