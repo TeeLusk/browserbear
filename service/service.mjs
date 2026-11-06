@@ -16,6 +16,7 @@ import { createMarks } from './marks.mjs';
 import { domainOf, looksLikeEmail, menuProfiles, openByEmail, openByMenu } from './chrome.mjs';
 import { RefMap, compact, diff, sameApartFromFocus } from './snapshot.mjs';
 import { createPanel } from './panel.mjs';
+import { loginsFor, pickLogin, secretsFor } from './onepassword.mjs';
 import { tbPath, showBrowserPanel } from './threadbear.mjs';
 
 fs.mkdirSync(LOGS, { recursive: true, mode: 0o700 });
@@ -301,7 +302,7 @@ async function whose(tabId) {
 // Commands that change a page. Looking (snap, read, shot, eval, show) stays
 // open on any tab, unmarked on the user's own; these need the tab to be an
 // agent's, or the user's tab to have been lent with claim or --user-tab.
-const ACTS = new Set(['click', 'type', 'key', 'goto', 'upload', 'dialog', 'cdp']);
+const ACTS = new Set(['click', 'type', 'key', 'goto', 'upload', 'dialog', 'cdp', 'fill']);
 const NOT_YOURS = "If you meant a tab you opened, use the id browserbear open printed (open --id prints only that), not a match from browserbear tabs.";
 
 function refuseUserTab(cmd, tabId, { who, left, t }) {
@@ -371,6 +372,7 @@ const USES = {
   upload: () => 'uploading a file',
   download: () => 'downloading a file',
   dialog: () => 'answering a dialog',
+  fill: () => 'signing in with 1Password',
   show: () => 'looking at the page',
 };
 
@@ -1523,6 +1525,48 @@ const commands = {
       return (note ? note + '\n' : '') + (await snapshot(tab));
     }),
 
+  // Sign in from 1Password (onepassword.mjs): whatever of username, password
+  // and one-time code the page is asking for now, so a two-step sign-in
+  // (Google's email page, then its password page) takes a fill on each. The
+  // values go from 1Password into the page and nowhere else: what comes back
+  // is which login and which fields, not the page.
+  async fill({ tab, item, submit }) {
+    if ((await ownerOf(tab)).instance !== AGENT_INSTANCE) throw new Error(`fill only signs in in the agent's own Chrome (--profile agent), not tab ${tab}`);
+    const t = await tabNow(tab);
+    await cdp(tab, 'Runtime.enable').catch(() => {});
+    const found = (await cdp(tab, 'Runtime.evaluate', { expression: FIND_LOGIN_FIELDS, returnByValue: true })).result?.value || {};
+    if (!found.user && !found.password && !found.otp) {
+      throw new Error(`tab ${tab} (${t.url.slice(0, 100)}) has no sign-in field fill can see (it doesn't reach into frames). Snap it, or hand it to the user: browserbear handoff ${tab} --wait`);
+    }
+    const login = pickLogin(await loginsFor(t.url), item, t.url);
+    const secret = await secretsFor(login.id, { otp: Boolean(found.otp) });
+    const filled = [];
+    const put = async (which, value) => {
+      const focused = (await cdp(tab, 'Runtime.evaluate', { expression: `(() => { const e = document.querySelector('[data-browserbear-fill="${which}"]'); if (!e) return false; e.focus(); e.select?.(); return document.activeElement === e; })()`, returnByValue: true })).result?.value;
+      if (!focused) throw new Error(`the page changed before fill could type into its ${which} field; snap ${tab} and try again`);
+      await cdp(tab, 'Input.insertText', { text: value });
+      filled.push(which === 'otp' ? 'one-time code' : which === 'user' ? 'username' : 'password');
+    };
+    try {
+      if (found.user && secret.username) await put('user', secret.username);
+      if (found.password && secret.password) await put('password', secret.password);
+      if (found.otp) {
+        if (!secret.hasOtp) throw new Error(`the page wants a one-time code, but "${login.title}" in 1Password has none. Hand it to the user: browserbear handoff ${tab} --wait`);
+        await put('otp', secret.otp);
+      }
+    } finally {
+      await cdp(tab, 'Runtime.evaluate', { expression: `document.querySelectorAll('[data-browserbear-fill]').forEach((e) => e.removeAttribute('data-browserbear-fill'))` }).catch(() => {});
+    }
+    if (!filled.length) throw new Error(`"${login.title}" in 1Password has nothing for the fields on this page`);
+    if (submit) {
+      await markPage(tab);
+      await pressKey(tab, 'Enter');
+      await settleAfterAction(tab);
+    }
+    const now = await tabNow(tab).catch(() => t);
+    return `filled the ${filled.join(', ')} from 1Password ("${login.title}") in tab ${tab}${submit ? ' and pressed Enter' : "; press the page's sign-in button (or run fill again with --submit)"}. Now on: ${now.title} <${now.url.slice(0, 100)}>`;
+  },
+
   key: ({ tab, key }) =>
     orClosed(tab, async (sending) => {
       await markPage(tab);
@@ -1792,6 +1836,24 @@ async function hostsReady() {
   // Each profile's host reconnects on its own clock; let the rest catch up.
   await sleep(Math.max(0, 1_000 - (Date.now() - startedAt)));
 }
+
+// Marks the sign-in fields a page shows now, for fill: the visible
+// username (or email), password and one-time code inputs.
+const FIND_LOGIN_FIELDS = `(() => {
+  document.querySelectorAll('[data-browserbear-fill]').forEach((e) => e.removeAttribute('data-browserbear-fill'));
+  const shown = (e) => !e.disabled && !e.readOnly && e.getClientRects().length > 0 && (e.checkVisibility ? e.checkVisibility() : true);
+  const inputs = [...document.querySelectorAll('input')].filter(shown);
+  const words = (e) => [e.name, e.id, e.placeholder, e.getAttribute('aria-label'), e.autocomplete].join(' ');
+  const textish = (e) => ['text', 'email', 'tel', ''].includes(e.type);
+  const password = inputs.find((e) => e.type === 'password');
+  const otp = password ? null : inputs.find((e) => (textish(e) || e.type === 'number') && (e.autocomplete === 'one-time-code' || /otp|totp|2fa|mfa|one.?time|verification.?code|security.?code|authenticat/i.test(words(e))));
+  let user = inputs.find((e) => textish(e) && e !== otp && (e.type === 'email' || /username|email/i.test(e.autocomplete) || /user|email|login|account|identifier/i.test(words(e))));
+  if (!user && password) user = inputs.filter((e) => textish(e) && e.compareDocumentPosition(password) & Node.DOCUMENT_POSITION_FOLLOWING).pop();
+  if (user) user.setAttribute('data-browserbear-fill', 'user');
+  if (password) password.setAttribute('data-browserbear-fill', 'password');
+  if (otp) otp.setAttribute('data-browserbear-fill', 'otp');
+  return { user: Boolean(user), password: Boolean(password), otp: Boolean(otp) };
+})()`;
 
 // Agent-only trial (Mike, 6 Nov 2026). While this file exists, agents keep
 // to the agent's own Chrome, whose pages show in Threadbear's Browser panel,

@@ -55,6 +55,11 @@ and eval. click, type, key, goto, upload and dialog need claim first, or --user-
 user asked for work in that tab. close refuses them unless --user-tab, so only when they asked for it.
   browserbear reload [--profile p]              reload the extension after changing it (all profiles by default)
   browserbear status
+  browserbear fill <tab> [--item <title|id>] [--submit]
+                                                sign in from 1Password in the agent's Chrome: types whichever
+                                                of username, password and one-time code the page asks for now
+                                                (run it again on the next step). The user approves with Touch ID;
+                                                you never see the values. No login saved: handoff instead
   browserbear agent-only [on|off]               keep agents to the agent's own Chrome (shown in Threadbear's Browser
                                                 panel) and refuse the user's own profiles. Off unless turned on
 
@@ -72,7 +77,7 @@ function parse(argv) {
       const next = argv[i + 1];
       // --group is gone (Chrome kept every group on the bookmarks bar), but
       // still eats its value so old commands don't read it as a URL.
-      if (next !== undefined && !next.startsWith('--') && ['profile', 'group', 'until-url', 'until-text', 'timeout'].includes(key)) flags[key] = argv[++i];
+      if (next !== undefined && !next.startsWith('--') && ['profile', 'group', 'until-url', 'until-text', 'timeout', 'item'].includes(key)) flags[key] = argv[++i];
       else flags[key] = true;
     } else pos.push(a);
   }
@@ -103,6 +108,8 @@ function argsFor(cmd, pos, flags) {
       return { tab: a, key: b };
     case 'goto':
       return { tab: a, url: b };
+    case 'fill':
+      return { tab: a, item: flags.item, submit: !!flags.submit };
     case 'read':
     case 'show':
     case 'focus':
