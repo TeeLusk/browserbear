@@ -1586,6 +1586,9 @@ const commands = {
         backendIds.push((await cdp(tab, 'DOM.describeNode', { objectId: fields[which] })).node.backendNodeId);
         const put = (await cdp(tab, 'Runtime.callFunctionOn', { objectId: fields[which], functionDeclaration: PUT_FIELD, arguments: [{ value }, { value: allowedFor(login) }], returnByValue: true })).result?.value;
         if (put === 'site') throw new FillStopped(`the tab is no longer on a site "${login.title}" is saved for`);
+        // X keeps a hidden password box on its username step that goes once
+        // the username's in: what's typed so far is the step, not a failure.
+        if (put !== 'ok' && filled.length) break;
         if (put !== 'ok') throw new FillStopped(`the page changed before fill could type the ${label}`);
         filled.push(label);
       }
