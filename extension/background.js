@@ -43,7 +43,7 @@ async function hello() {
     return fresh;
   });
   const user = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' });
-  post({ type: 'hello', instance, email: user.email || null, version: chrome.runtime.getManifest().version, panelPopups: true });
+  post({ type: 'hello', instance, email: user.email || null, version: chrome.runtime.getManifest().version, panelPopups: true, screencast: true });
 }
 
 function post(msg) {
@@ -250,6 +250,10 @@ const ops = {
   },
 
   async cdp({ tabId, method, params }) {
+    // A screencast shows the page as it draws, so the pill stays out of it
+    // for as long as the cast runs, not just around one command.
+    if (method === 'Page.startScreencast') { casting.add(tabId); await hideMark(tabId); }
+    if (method === 'Page.stopScreencast') casting.delete(tabId);
     if (COVERED.test(method)) await hideMark(tabId);
     try {
       await attach(tabId);
@@ -280,7 +284,7 @@ const ops = {
         throw new Error(`${who} is in tab ${tabId} and Chrome won't let BrowserBear in while it's there; clearing it didn't stick (${again?.message}). The page itself is fine`);
       }
     } finally {
-      if (COVERED.test(method)) showMarkSoon(tabId);
+      if (COVERED.test(method) || method === 'Page.stopScreencast') showMarkSoon(tabId);
     }
   },
 
@@ -359,6 +363,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
 // steps aside for those commands and comes back just after.
 const COVERED = /^(Input\.|DOM\.getNodeForLocation$|Page\.captureScreenshot$)/;
 const showTimers = new Map();
+const casting = new Set(); // tabs streaming to Threadbear's Browser panel
 
 async function hideMark(tabId) {
   if (!(tabId in (await markStore()))) return;
@@ -369,7 +374,7 @@ async function hideMark(tabId) {
 }
 
 function showMarkSoon(tabId) {
-  if (!showTimers.has(tabId)) return;
+  if (!showTimers.has(tabId) || casting.has(tabId)) return;
   clearTimeout(showTimers.get(tabId));
   showTimers.set(tabId, setTimeout(() => {
     showTimers.delete(tabId);
@@ -610,7 +615,9 @@ async function attach(tabId) {
     }
   }
   clearTimeout(attached.get(tabId));
-  attached.set(tabId, setTimeout(() => detach(tabId), IDLE_DETACH_MS));
+  // A cast of a page that isn't changing sends no frames, and so no acks:
+  // that's not idle.
+  attached.set(tabId, setTimeout(() => (casting.has(tabId) ? attach(tabId) : detach(tabId)), IDLE_DETACH_MS));
 }
 
 // Points other extensions' frames in the tab at about:blank (and hides them),
@@ -658,11 +665,15 @@ async function blankExtensionFrames(tabId) {
 
 async function detach(tabId) {
   clearTimeout(attached.get(tabId));
+  // Our own detach ends a cast without an onDetach.
+  if (casting.delete(tabId)) showMarkSoon(tabId);
   if (!attached.delete(tabId)) return;
   await chrome.debugger.detach({ tabId }).catch(() => {});
 }
 
 chrome.debugger.onDetach.addListener(({ tabId }, reason) => {
+  casting.delete(tabId);
+  showMarkSoon(tabId);
   clearTimeout(attached.get(tabId));
   attached.delete(tabId);
   post({ type: 'event', event: 'detached', tabId, reason });
@@ -672,6 +683,9 @@ chrome.debugger.onEvent.addListener(({ tabId }, method, params) => {
   // Only what the service needs to know about; everything else stays here.
   if (method === 'Page.javascriptDialogOpening') post({ type: 'event', event: 'dialog', tabId, params });
   if (method === 'Page.javascriptDialogClosed') post({ type: 'event', event: 'dialogClosed', tabId });
+  // The Browser panel's picture. Chrome sends the next one once the service
+  // acks this one, so a slow panel gets fewer frames, not a queue.
+  if (method === 'Page.screencastFrame' && casting.has(tabId)) post({ type: 'event', event: 'frame', tabId, params: { data: params.data, sessionId: params.sessionId } });
 });
 
 // The setup page: a checklist of what this profile still needs. It opens by

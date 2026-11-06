@@ -317,3 +317,62 @@ test('one capture timeout retries without disconnecting the page', async t => {
   assert.ok(events.some(e => e.method === 'Page.screencastFrame'));
   assert.ok(!events.some(e => e.method === 'panelError'));
 });
+
+test('extension 0.3.7 streams Chrome’s screencast, acks each frame once the panel took it, and stops it on close', async t => {
+  const { deps, panel, dispatch, conn, calls } = setup(t);
+  const profile = deps.profiles()[0];
+  profile.screencast = true;
+  await dispatch('panelAttach', { tab: 7 });
+  await dispatch('panelCdp', { method: 'Page.startScreencast', params: { quality: 85, maxWidth: 1000, maxHeight: 1600 } });
+  await new Promise(r => setTimeout(r, 20));
+  const start = calls.find(c => c.method === 'Page.startScreencast');
+  assert.deepEqual(start.params, { format: 'jpeg', quality: 85, everyNthFrame: 1, maxWidth: 1000, maxHeight: 1600 });
+
+  // A new panel size restarts the cast at that size.
+  await dispatch('panelCdp', { method: 'Page.startScreencast', params: { quality: 85, maxWidth: 800, maxHeight: 1600 } });
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(calls.filter(c => c.method === 'Page.startScreencast').at(-1).params.maxWidth, 800);
+
+  panel.event(profile, { type: 'event', event: 'frame', tabId: 7, params: { data: 'ZnJhbWU=', sessionId: 3 } });
+  await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(conn.messages.at(-1), { method: 'Page.screencastFrame', params: { data: 'ZnJhbWU=' } });
+  assert.deepEqual(calls.at(-1), { instance: 'personal', op: 'cdp', tabId: 7, method: 'Page.screencastFrameAck', params: { sessionId: 3 } });
+
+  // A full socket: the ack waits for it to drain.
+  conn.write = line => { conn.messages.push(JSON.parse(line)); return false; };
+  panel.event(profile, { type: 'event', event: 'frame', tabId: 7, params: { data: 'Zm9v', sessionId: 4 } });
+  await new Promise(r => setTimeout(r, 10));
+  assert.ok(!calls.some(c => c.params?.sessionId === 4));
+  conn.emit('drain');
+  await new Promise(r => setTimeout(r, 10));
+  assert.ok(calls.some(c => c.method === 'Page.screencastFrameAck' && c.params.sessionId === 4));
+
+  conn.emit('close');
+  await new Promise(r => setTimeout(r, 20));
+  assert.ok(calls.some(c => c.method === 'Page.stopScreencast'));
+  // A late frame after the panel went stops the cast rather than acking it.
+  const before = calls.length;
+  panel.event(profile, { type: 'event', event: 'frame', tabId: 7, params: { data: 'Zm9v', sessionId: 5 } });
+  await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(calls.slice(before).map(c => c.method), ['Page.stopScreencast']);
+});
+
+test('screenshots step aside while cast frames flow, and fill in for a hidden tab Chrome stops drawing', async t => {
+  const { deps, panel, dispatch, conn, calls } = setup(t);
+  const profile = deps.profiles()[0];
+  profile.screencast = true;
+  await dispatch('panelAttach', { tab: 7 });
+  await dispatch('panelCdp', { method: 'Page.startScreencast', params: { quality: 80 } });
+  const shots = () => calls.filter(c => c.method === 'Page.captureScreenshot').length;
+  await new Promise(r => setTimeout(r, 100));
+  assert.ok(shots() >= 1, 'screenshots until the first cast frame');
+  const casting = setInterval(() => panel.event(profile, { event: 'frame', tabId: 7, params: { data: 'Zm9v', sessionId: 1 } }), 16);
+  await new Promise(r => setTimeout(r, 100));
+  const during = shots();
+  await new Promise(r => setTimeout(r, 400));
+  clearInterval(casting);
+  assert.ok(shots() - during <= 0, `${shots() - during} screenshots while cast frames came`);
+  await new Promise(r => setTimeout(r, 600));
+  assert.ok(shots() > during, 'screenshots again once the cast went quiet');
+  assert.ok(conn.messages.filter(m => m.method === 'Page.screencastFrame').length > 20);
+});

@@ -99,7 +99,10 @@ export function createPanel({ home, profiles, call, mark, popup = () => {}, dial
     // user's real tab stuck at the panel's width after it closes or disconnects.
     await render(v, async () => {
       await answered;
+      const cast = v.casting;
+      v.casting = false;
       await Promise.allSettled([
+        cast ? send(v, 'Page.stopScreencast') : null,
         send(v, 'Emulation.clearDeviceMetricsOverride'),
         send(v, 'Emulation.setFocusEmulationEnabled', { enabled: false }),
       ]);
@@ -121,8 +124,33 @@ export function createPanel({ home, profiles, call, mark, popup = () => {}, dial
     }
   }
 
+  // Extension 0.3.7 and later also stream Chrome's own screencast: a frame
+  // each time the page draws, up to 60 a second. Screenshots alone come back
+  // at 6 to 8 a second (about 100 ms each for Discord, 6 Nov), which made
+  // scrolling in the panel judder. Chrome doesn't draw a tab that's hidden
+  // behind another in its window, so screenshots still fill in whenever no
+  // cast frame has come for a moment; a still page costs what it did before.
+  const CAST_FRESH_MS = 250;
+  function cast(v) {
+    if (profileFor(v)?.screencast !== true) return;
+    v.casting = true;
+    render(v, async () => {
+      if (v.stopped || v.paused || v.dialog || !v.capturing) return;
+      await send(v, 'Page.startScreencast', v.cast);
+    }).catch(() => {}); // the screenshots carry on regardless
+  }
+  function startFrames(v) {
+    cast(v);
+    capture(v, ++v.generation);
+  }
+
   async function capture(v, generation) {
     if (v.stopped || v.paused || v.dialog || !v.capturing || v.conn.destroyed || generation !== v.generation) return;
+    if (v.casting && Date.now() - (v.lastCast || 0) < CAST_FRESH_MS) {
+      v.timer = setTimeout(() => capture(v, generation), 100);
+      return;
+    }
+    const asked = Date.now();
     try {
       const result = await render(v, () => {
         if (v.stopped || v.paused || generation !== v.generation) throw new Error('Capture ended.');
@@ -130,6 +158,8 @@ export function createPanel({ home, profiles, call, mark, popup = () => {}, dial
       });
       if (v.stopped || v.paused || !v.capturing || v.conn.destroyed || generation !== v.generation) return;
       v.captureFailures = 0;
+      // A cast frame came in while this was being taken, and is newer.
+      if ((v.lastCast || 0) > asked) { v.timer = setTimeout(() => capture(v, generation), 100); return; }
       // A bounded queue: don't capture another frame until this one drained.
       const ready = v.conn.write(line({ method: 'Page.screencastFrame', params: { data: result.data } }));
       if (!ready) await new Promise(resolve => {
@@ -169,8 +199,25 @@ export function createPanel({ home, profiles, call, mark, popup = () => {}, dial
       await send(v, 'Emulation.setFocusEmulationEnabled', { enabled: true });
       if (v.metrics) await send(v, 'Emulation.setDeviceMetricsOverride', v.metrics);
     }).then(() => {
-      if (v.capturing && !v.paused && !v.stopped) capture(v, ++v.generation);
+      if (v.capturing && !v.paused && !v.stopped) startFrames(v);
     }).catch(e => { if (!v.dialog && !v.stopped && !v.paused) suspend(v, e.message); });
+  }
+
+  // A screencast frame from the extension. Chrome sends no more until it's
+  // acked, and it's acked once the panel's socket has taken it, so a slow
+  // panel gets fewer frames rather than a queue.
+  function frame(profile, { tabId, params = {} }) {
+    const cdp = (method, p = {}) => call(profile, 'cdp', { tabId, method, params: p }, 8_000).catch(() => {});
+    const v = [...viewers.values()].find(v => v.instance === profile.instance && v.tabId === tabId);
+    // Nobody's watching (a panel that closed, a service that restarted).
+    if (!v || !v.casting || v.stopped || v.paused || v.conn.destroyed) return cdp('Page.stopScreencast');
+    const ack = () => cdp('Page.screencastFrameAck', { sessionId: params.sessionId });
+    if (v.dialog) return ack();
+    v.lastCast = Date.now();
+    if (v.conn.write(line({ method: 'Page.screencastFrame', params: { data: params.data } }))) return ack();
+    const finish = () => { v.conn.off('drain', finish); v.conn.off('close', finish); ack(); };
+    v.conn.once('drain', finish);
+    v.conn.once('close', finish);
   }
 
   async function handle(conn, { cmd, args = {}, thread }) {
@@ -260,13 +307,18 @@ export function createPanel({ home, profiles, call, mark, popup = () => {}, dial
     if ((method === 'Input.dispatchMouseEvent' && params.type === 'mousePressed') || (method === 'Input.dispatchKeyEvent' && ['keyDown', 'rawKeyDown'].includes(params.type))) v.lastInput = Date.now();
     if (method === 'Page.startScreencast') {
       v.quality = Math.max(30, Math.min(85, Number(params.quality) || 80));
-      if (!v.capturing) { v.capturing = true; capture(v, ++v.generation); }
+      const size = n => (Number(n) > 0 ? Math.round(Number(n)) : undefined);
+      v.cast = { format: 'jpeg', quality: v.quality, everyNthFrame: 1, maxWidth: size(params.maxWidth), maxHeight: size(params.maxHeight) };
+      if (!v.capturing) { v.capturing = true; startFrames(v); }
+      // Starting a cast again with a new size just changes the size.
+      else if (v.casting) cast(v);
       return {};
     }
     if (method === 'Page.stopScreencast') {
       v.capturing = false;
       v.generation++;
       clearTimeout(v.timer);
+      if (v.casting) { v.casting = false; await send(v, 'Page.stopScreencast').catch(() => {}); }
       return {};
     }
     if (method === 'Page.handleJavaScriptDialog') {
@@ -317,6 +369,7 @@ export function createPanel({ home, profiles, call, mark, popup = () => {}, dial
     handedOff(tabId, instance, inChrome = false) { const t = ownTab(tabId, instance); if (t) { t.handoffs++; t.handoffAt = Date.now(); t.inChrome = inChrome; persist(); } },
     forget(tabId, instance) { tabs.delete(key(instance, tabId)); persist(); for (const v of viewers.values()) if (v.tabId === tabId && v.instance === instance) release(v); },
     event(profile, msg) {
+      if (msg.event === 'frame') return frame(profile, msg);
       for (const v of viewers.values()) {
         if (v.instance !== profile.instance || v.tabId !== msg.tabId || v.paused || v.stopped) continue;
         if (msg.event === 'dialog') {

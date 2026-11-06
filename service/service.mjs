@@ -1839,7 +1839,7 @@ const server = net.createServer((conn) => {
           old.pending.clear();
           old.conn.destroy();
         }
-        profile = { instance: msg.instance, email: msg.email, name: msg.name || known.name || menuNames.get(msg.email), menuName: menuNames.get(msg.email), dir: known.dir, panelPopups: msg.panelPopups === true, conn, pending: new Map() };
+        profile = { instance: msg.instance, email: msg.email, name: msg.name || known.name || menuNames.get(msg.email), menuName: menuNames.get(msg.email), dir: known.dir, panelPopups: msg.panelPopups === true, screencast: msg.screencast === true, conn, pending: new Map() };
         profiles.set(msg.instance, profile);
         log('hello from', describe(profile), msg.version);
         marks.resend();
