@@ -60,11 +60,13 @@ async function onMessage(msg) {
   // it starts, so "up" also means Chrome could start it).
   if (msg.type === 'service') {
     Object.assign(link, { host: 'up', error: null, service: msg.up });
-    if (!msg.up) link.profile = null;
+    if (!msg.up) { link.profile = null; stopCasts(); }
     return;
   }
   // From the service, after our hello: the name agents will use for us.
   if (msg.type === 'welcome') {
+    // A service that just started has no panel watching any cast of ours.
+    stopCasts();
     Object.assign(link, { host: 'up', error: null, service: true, profile: { name: msg.name || null, email: msg.email || null, dir: msg.dir || null } });
     return;
   }
@@ -338,7 +340,11 @@ async function paint(tabId, mark) {
 chrome.tabs.onUpdated.addListener(async (tabId, change) => {
   if (change.status !== 'complete') return;
   const mark = (await markStore())[tabId];
-  if (mark) await paint(tabId, mark);
+  if (!mark) return;
+  await paint(tabId, mark);
+  // The new page's pill is drawn showing. If it's meant to be out of the
+  // way (a cast to the Browser panel, a click), put it back out of the way.
+  if (showTimers.has(tabId)) await setMarkHidden(tabId, true);
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
@@ -364,6 +370,17 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
 const COVERED = /^(Input\.|DOM\.getNodeForLocation$|Page\.captureScreenshot$)/;
 const showTimers = new Map();
 const casting = new Set(); // tabs streaming to Threadbear's Browser panel
+
+// The service went away without stopping its casts (it crashed, or was
+// killed): a still page sends no frames to notice that by, and a cast keeps
+// the tab attached and its pill hidden.
+function stopCasts() {
+  for (const tabId of casting) {
+    casting.delete(tabId);
+    chrome.debugger.sendCommand({ tabId }, 'Page.stopScreencast').catch(() => {});
+    showMarkSoon(tabId);
+  }
+}
 
 async function hideMark(tabId) {
   if (!(tabId in (await markStore()))) return;

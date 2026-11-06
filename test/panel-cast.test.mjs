@@ -25,4 +25,14 @@ test('the extension forwards screencast frames while a cast runs, and only then'
   const stopped = await worker('self.__frames');
   await new Promise(r => setTimeout(r, 500));
   assert.equal(await worker('self.__frames'), stopped, 'no frames after the cast stopped');
+
+  // The service dying without stopping its cast stops it too.
+  await worker(`ops.cdp({ tabId: ${tabId}, method: 'Page.startScreencast', params: { format: 'jpeg' } }).then(() => true)`);
+  await new Promise(r => setTimeout(r, 500));
+  assert.ok(await worker('self.__frames') > stopped, 'cast again');
+  await worker(`(onMessage({ type: 'service', up: false }), true)`);
+  await new Promise(r => setTimeout(r, 300));
+  const gone = await worker('self.__frames');
+  await new Promise(r => setTimeout(r, 500));
+  assert.equal(await worker('self.__frames'), gone, 'no frames once the service went');
 });
