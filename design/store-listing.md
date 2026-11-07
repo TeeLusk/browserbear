@@ -1,6 +1,6 @@
 # Chrome Web Store listing (draft)
 
-Live: BrowserBear 0.3.4, published 3 Nov 2026 (it replaced Paws 0.1.2). Each new upload
+Live: BrowserBear 0.3.8, updated 6 Nov 2026 by the listing's date (it replaced 0.3.4). Each new upload
 needs a version bump and goes through review again; new permissions need a justification
 on the Privacy tab before it can be submitted.
 
