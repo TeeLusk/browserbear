@@ -24,7 +24,6 @@ import { spawn } from 'node:child_process';
 import { HOME, SOCKET, line, lineReader } from '../service/wire.mjs';
 
 export const DIR = path.join(HOME, 'agent');
-const PROFILE = path.join(DIR, 'chrome-profile');
 const STATE = path.join(DIR, 'tabs.json');
 const IDS = path.join(DIR, 'tab-ids.json');
 const PORT = Number(process.env.BROWSERBEAR_AGENT_PORT) || 9339;
@@ -48,6 +47,10 @@ function agentApp() {
 }
 export const APP = agentApp();
 export const BROWSER_NAME = path.basename(APP).replace(/\.app$/, '');
+// A folder per browser: Helium can't read Chrome's saved sign-ins (each keeps
+// its cookie key in its own Keychain item), and a profile shouldn't be passed
+// between two browsers. Google Chrome keeps the folder it always had.
+const PROFILE = path.join(DIR, BROWSER_NAME === 'Google Chrome' ? 'chrome-profile' : `${BROWSER_NAME.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-profile`);
 
 // Its windows are real windows on Mike's screens, opened behind whatever he's
 // using (8 Nov: the parked windows streamed into Threadbear's panel are gone).
@@ -77,9 +80,44 @@ async function browserWsUrl() {
   return r?.ok ? (await r.json()).webSocketDebuggerUrl : null;
 }
 
+// The program on the debugging port, from its process list: /json/version says
+// "Chrome/..." for Helium too.
+async function runningApp(url) {
+  const sock = new WebSocket(url);
+  try {
+    await new Promise((resolve, reject) => { sock.onopen = resolve; sock.onerror = reject; });
+    const info = await new Promise((resolve) => {
+      sock.onmessage = (e) => resolve(JSON.parse(e.data));
+      sock.send(JSON.stringify({ id: 1, method: 'SystemInfo.getProcessInfo' }));
+      setTimeout(() => resolve(null), 3000);
+    });
+    const pid = info?.result?.processInfo?.find((p) => p.type === 'browser')?.id;
+    if (!pid) return { sock, path: null };
+    const { execFileSync } = await import('node:child_process');
+    return { sock, path: execFileSync('/bin/ps', ['-o', 'comm=', '-p', String(pid)]).toString().trim() };
+  } catch {
+    sock.close();
+    return { sock: null, path: null };
+  }
+}
+
+const isOurApp = (exe) => !exe || (APP.includes('/') ? exe.startsWith(`${APP}/`) : exe.includes(`/${APP}.app/`));
+
 async function ensureChrome() {
   let url = await browserWsUrl();
-  if (url) return url;
+  if (url) {
+    // Another browser on our port: the agents' old Google Chrome from before
+    // Helium (8 Nov 2026), say. Close it and start the right one, or agents
+    // would carry on in it under Helium's name.
+    const { sock, path: exe } = await runningApp(url);
+    if (isOurApp(exe)) { sock?.close(); return url; }
+    log('closing', exe, 'on our port, to start', APP);
+    sock.send(JSON.stringify({ id: 2, method: 'Browser.close' }));
+    for (let i = 0; i < 50 && (await browserWsUrl()); i++) await sleep(200);
+    sock.close();
+    if (await browserWsUrl()) throw new Error(`another browser (${exe}) is on the agents' port ${PORT} and didn't close`);
+    url = null;
+  }
   log('starting', APP);
   // -g: don't bring it to the front. -n: a copy of its own, beside any Mike runs.
   spawn('open', ['-g', '-n', '-a', APP, '--args', ...CHROME_FLAGS], { stdio: 'ignore' });

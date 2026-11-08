@@ -75,7 +75,7 @@ browserbear CLI (or Threadbear)
 profiles, with no extension (`agent/agent-host.mjs`, started when it's first asked for).
 It's [Helium](https://helium.computer) if it's installed, else Google Chrome
 (`BROWSERBEAR_AGENT_APP=/path/to/Some.app` picks another), with its own folder
-(`agent/chrome-profile` in BrowserBear's folder) and a debugging port on this Mac only.
+(`agent/helium-profile` in BrowserBear's folder; a Google Chrome left on its port is closed first) and a debugging port on this Mac only.
 It stands in for the extension, so every command above works there.
 
 Each page gets a real window of its own, opened behind your windows without taking the
