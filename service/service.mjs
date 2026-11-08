@@ -1333,7 +1333,7 @@ async function handoffHint(tabId) {
   if (!bearTabs.has(tabId)) return '';
   const signIn = await evaluate(tabId, SIGN_IN).catch(() => false);
   return signIn
-    ? `\n(this looks like a sign-in page, in BrowserBear's own window, which the user may not be looking at. If they have to sign in: browserbear handoff ${tabId} --wait)`
+    ? `\n(this looks like a sign-in page, in a window the user may not be looking at. If they have to sign in: browserbear handoff ${tabId} --wait)`
     : '';
 }
 
@@ -1448,7 +1448,8 @@ const commands = {
       await wake(tab.tabId);
       await drawn(tab.tabId);
       const snap = await snapshot(tab.tabId);
-      return `opened tab ${tab.tabId} in ${describe(p)}, in BrowserBear's own window\n${snap}${await handoffHint(tab.tabId)}`;
+      const where = p.instance === AGENT_INSTANCE ? `the agents' browser (${p.browser || 'Helium'}), in a window behind the user's` : `${describe(p)}, in BrowserBear's own window`;
+      return `opened tab ${tab.tabId} in ${where}\n${snap}${await handoffHint(tab.tabId)}`;
     } catch (e) {
       e.message = `opened tab ${tab.tabId} in ${describe(p)}, but couldn't look at it yet: ${e.message}`;
       throw e;

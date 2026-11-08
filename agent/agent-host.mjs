@@ -247,6 +247,16 @@ const tabOf = (tabId) => {
   return tab;
 };
 
+// The page's window to the front, and the browser with it. Page.bringToFront
+// activates the app, except the first time after it started in the background
+// (open -g): then it takes a second ask (checked on Tinker Desk, 8 Nov 2026).
+async function bringForward(tab) {
+  const session = await sessionFor(tab);
+  await browserCall('Page.bringToFront', {}, session);
+  await sleep(300);
+  await browserCall('Page.bringToFront', {}, session);
+}
+
 function loaded(tab, timeoutMs = 25_000) {
   return new Promise((resolve) => {
     const start = Date.now();
@@ -354,12 +364,11 @@ const ops = {
     return tabInfo(tabOf(tabId));
   },
 
-  // Brings the page's real window to the front, and the browser with it
-  // (Page.bringToFront activates the app too). For "Show window" in
+  // Brings the page's real window to the front, for "Show window" in
   // Threadbear's Browser panel.
   async focus({ tabId }) {
     const tab = tabOf(tabId);
-    await browserCall('Page.bringToFront', {}, await sessionFor(tab));
+    await bringForward(tab);
     return tabInfo(tab);
   },
 
@@ -394,7 +403,7 @@ const ops = {
     const tab = tabOf(tabId);
     tab.handoffs += 1;
     writeState();
-    await browserCall('Page.bringToFront', {}, await sessionFor(tab)).catch((e) => log('bringToFront failed', e.message));
+    await bringForward(tab).catch((e) => log('bringToFront failed', e.message));
     return tabInfo(tab);
   },
 
