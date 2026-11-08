@@ -69,68 +69,52 @@ browserbear CLI (or Threadbear)
 - `key Shift+Enter` adds a line break in rich editors, and `type` keeps the newlines in
   its text. Neither sends a Discord message; only `Enter` or `--submit` do.
 
-## The agent's own Chrome
+## The agents' own browser
 
-`--profile agent` works in a Chrome of the agent's own instead of one of your
+`--profile agent` works in a browser of the agents' own instead of one of your
 profiles, with no extension (`agent/agent-host.mjs`, started when it's first asked for).
-It's real Google Chrome with its own folder (`agent/chrome-profile` in BrowserBear's
-folder), on a debugging port on this Mac only, and it stands in for the extension, so every
-command above works there. Each page gets a window of its own, parked in a corner of a
-screen where about 40 points of it show. Threadbear's Browser panel draws the thread's pages and
-sends your mouse and keys to them, and `handoff` opens that panel, so nothing comes to the front.
-You sign in once per account, in the panel, and those sign-ins stay in that folder.
+It's [Helium](https://helium.computer) if it's installed, else Google Chrome
+(`BROWSERBEAR_AGENT_APP=/path/to/Some.app` picks another), with its own folder
+(`agent/chrome-profile` in BrowserBear's folder) and a debugging port on this Mac only.
+It stands in for the extension, so every command above works there.
 
-Chrome's own windows over a page (the passkey sheet, a permission prompt, the password
-manager) aren't in the panel's picture, and Chrome keeps them on a screen even with
-their page's window parked, so one used to turn up hanging off the edge of a monitor.
-The host watches the window server for them (`agent/sheets.mjs`, a few milliseconds a
-look, no Screen Recording needed), brings the page's window to the middle of the screen
-you're using, with the sheet on it, and parks it again once the sheet closes. It sets
-`sheet` on the tab in `agent/tabs.json` meanwhile, and Threadbear's panel says so.
+Each page gets a real window of its own, opened behind your windows without taking the
+focus. Agents keep working in it while it's covered. `handoff` brings the page's window
+to the front for you, with any of the browser's own sheets (a passkey, a permission).
+You sign in once per account, there, and those sign-ins stay in that folder.
+Threadbear's Browser panel lists a thread's pages with a still of each, and its Show
+window button brings one forward.
 
-Tried on 5 Nov 2026: Google's sign-in takes this, with scripted input and the port
-open. It rejects CEF and headless Chrome with "This browser or app may not be secure".
-Chrome stops drawing a minimised window, a hidden app and a background tab (0 frames
-a second, 5 s for a mouse event), hence a window per page; parked, a page streams at 60
-frames a second with about 33 ms from a click to the frame showing it.
+Why Helium (checked 8 Nov 2026, Helium 0.21): Google's sign-in accepts it with scripted
+input and the port open, as it does real Chrome (it rejects CEF and headless Chrome
+with "This browser or app may not be secure"). It's signed with Apple's passkey
+entitlement for browsers, so Touch ID passkeys work, which is why BrowserBear launches
+the installed app as it ships and never bundles or re-signs it. Unlike Google Chrome,
+it still takes `--load-extension`. It updates itself. 1Password's app doesn't connect to
+it; `browserbear fill` signs in from 1Password without that.
 
 Not yet: `download`, and frames from other origins in `probe`. Any program on this Mac can reach
-the debugging port, as it can reach BrowserBear's socket, so only sign this Chrome in to
-what you'd let your agents use. It leaves a second Chrome icon in the Dock and in ⌘-Tab.
+the debugging port, as it can reach BrowserBear's socket, so only sign this browser in to
+what you'd let your agents use.
 
-## Threadbear's Browser panel with existing Chrome profiles
+## Threadbear's Browser panel
 
-The panel can also use this extension's existing Chrome profile and sign-ins,
-through the service's private Unix socket. The profile's name and email stay
-visible, and the profile menu opens a page in the exact connected profile selected.
-No cookie or credential import is involved, and existing Store extensions work.
+The panel lists the pages a thread is using, in the agents' browser and in your own
+Chrome profiles, each with a still of the page, the agent's mark (working, your turn)
+and a Show window button that brings the page's real window to the front. It doesn't
+stream pages or send input into them: you use the real window. It all goes through the
+service's private Unix socket, and only the thread a page belongs to gets its still.
 
-The service tracks pages used by threads in `panel-tabs.json` (0600), storing
-profile/tab/target identities and cached titles, without full URLs or credentials.
-A stream checks the thread's ownership and Chrome's target identity, and only
-one panel controls a tab. A user-owned tab needs an explicit Show this tab here
-before the panel changes its viewport. Closing the panel restores its normal size.
-Frames remain in memory on this Mac.
+Stills of pages in the agents' browser are at most 3 s old while the panel asks. A page
+in one of your Chrome profiles is captured through the extension's debugger, which keeps
+Chrome's "started debugging" bar up, so its still is refreshed every 20 s at most, and
+never once it's been handed to you. The service tracks the pages threads use in
+`panel-tabs.json` (0600): profile, tab, thread and handoff count, no URLs or credentials.
+Stills stay in memory.
 
-The native-window button pauses capture for Chrome's passkeys, password managers
-and other native UI. Returning to the panel is explicit; Chrome's debugger Stop
-is respected until Reconnect. Existing-profile frames come from Chrome's own
-screencast through the extension (0.3.7 and later), up to 60 a second, each acked
-once the panel has taken it. Screenshots fill in when the cast goes quiet, and
-older extensions use screenshots only, which manage 6 to 8 frames a second.
-Viewport changes wait for a capture to finish, while input and dialog answers
-can pass it. Extension 0.3.6 also preserves Chrome's exact opener tab ID, so popups
-join the correct thread. Older extensions open new windows in Chrome; the
-panel says so. No hostname or URL matching is used to assign a popup.
-
-`browserbear handoff <tab> --wait` asks Threadbear to show this thread's Browser
-panel, even when it was closed. It opens immediately when the user is looking
-at the thread, or when they next open it, with Your turn and Done. It does not
-switch their selected thread. Ordinary `open` and `snap` leave the panel alone.
-The wait finishes on Done or when the page settles after the requested step.
-Without a connected Mac app that supports this handoff, or when the exact tab
-cannot be displayed, handoff uses Chrome's own window. Passkeys and other native
-Chrome UI remain available through the panel's window button.
+`browserbear handoff <tab>` on a page in the agents' browser also asks Threadbear to
+show the thread's Browser panel (without switching the thread you're on), as that
+browser has no pill in the page; the panel's Done button finishes `handoff --wait`.
 
 ## Install (for now)
 
@@ -170,8 +154,7 @@ browserbear handoff 1234 --wait                # ...and the agent carries on by 
 Agents work in a window of BrowserBear's own, so they never take over the tab
 you're looking at. When an agent needs you to do something in one of its tabs
 (sign in, pay, approve), `handoff` moves the tab into the Chrome window you
-last used and brings it to the front. `browserbear handoff-in panel` shows it in
-the thread's Browser panel in Threadbear instead (`handoff-in chrome` goes back). `open` and `goto` say so when a page looks like
+last used and brings it to the front. `open` and `goto` say so when a page looks like
 a sign-in. Given a URL, `handoff` finds the agent tab on that page; Threadbear
 does that when you click a link an agent gave you, so you don't end up with
 two tabs of the same sign-in.
@@ -199,8 +182,7 @@ or `--until-text "Payment received"`. Exits 0 when you've finished (including if
 drag the tab back to BrowserBear's window), 2 if you closed the tab and 124 at the
 timeout (`--timeout <seconds>`, 20 minutes by default). The wait watches the tab's
 address and a yes-or-no question to the page, without attaching a debugger just
-to monitor it. The Browser panel uses BrowserBear's debugger connection for its
-picture and input; its window button pauses that connection for native Chrome UI.
+to monitor it.
 
 Every tab an agent uses is marked, so you can tell it from yours. The tab's
 title starts with 🐻 and the thread's name, its icon gets a dot (green while
@@ -210,7 +192,7 @@ agent is doing, with Open thread (in the Threadbear app, or its website without 
 come off when the thread finishes its turn without needing you. The CLI passes
 `THREADBEAR_THREAD_ID` along and the service asks Threadbear's `tb` for the
 thread's name and state; outside Threadbear the tab just says "agent". The
-pill steps aside while the agent clicks or takes a screenshot, and while the Browser panel streams the tab, and agents see
+pill steps aside while the agent clicks or takes a screenshot, and agents see
 the page's own title.
 
 Uploads never open Chrome's file picker. Give `upload` the file input itself

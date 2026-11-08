@@ -1,29 +1,27 @@
 #!/usr/bin/env node
-// The agent's own Chrome, in place of the extension in Mike's profiles.
+// The agents' own browser, in place of the extension in Mike's profiles.
 //
-// It's real Google Chrome with a profile folder of its own, so it never touches
-// the Chrome he's using, and it speaks the extension's side of the service's
-// protocol (tabs, open, navigate, cdp and so on), so every page smart in
-// service.mjs still works. Three things found by trying them (5 Nov 2026):
-//  - Headless Chrome is rejected by Google's sign-in and CEF is too, with
-//    "This browser or app may not be secure". Real windowed Chrome isn't, even
-//    with the debugging port open and scripted input, so it has to be this.
-//  - Chrome stops drawing a window that's minimised, an app that's hidden and
-//    a tab that's in the background (0 frames a second, and 5 s for a mouse
-//    event). A window that's merely off to the side keeps 60 frames a second, so
-//    each tab gets a window of its own, parked in a corner of the screen, and
-//    the flags below stop Chrome pausing windows that are covered.
+// It's Helium (or Google Chrome where Helium isn't installed) with a profile
+// folder of its own, so it never touches the Chrome he's using, and it speaks
+// the extension's side of the service's protocol (tabs, open, navigate, cdp and
+// so on), so every page smart in service.mjs still works. Found by trying them
+// (5 and 8 Nov 2026):
+//  - Headless Chrome and CEF are rejected by Google's sign-in ("This browser or
+//    app may not be secure"). Real windowed Chrome and stock Helium aren't,
+//    even with the debugging port open and scripted input.
 //  - A fixed debugging port doesn't set navigator.webdriver; a pipe would.
+//  - Each page gets a real window of its own, opened behind Mike's windows: a
+//    tab behind another in its window stops drawing, and so does a minimised
+//    window. Covered windows keep drawing and taking input with the flags below.
 //
 // Threadbear's Browser panel reads tabs.json to learn which tabs a thread has,
-// and connects to the same port for the picture and for Mike's mouse and keys.
+// and asks the service for a still of each page and to bring its window forward.
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { HOME, SOCKET, line, lineReader } from '../service/wire.mjs';
-import { findSheets, onScreen, placeOn, sitsOn, watchWindows } from './sheets.mjs';
 
 export const DIR = path.join(HOME, 'agent');
 const PROFILE = path.join(DIR, 'chrome-profile');
@@ -32,21 +30,39 @@ const IDS = path.join(DIR, 'tab-ids.json');
 const PORT = Number(process.env.BROWSERBEAR_AGENT_PORT) || 9339;
 const WIDTH = 1280;
 const HEIGHT = 900;
-// Far past any screen: Chrome keeps about 40 points of the window on a display.
-// The window's top right corner is what shows at the bottom left, which is the
-// part with nothing in it to click by accident (top left is the close button).
-const PARK = { left: -100000, top: 100000 };
 
+// The agents' browser is Helium (helium.computer) where it's installed: a
+// Chromium that Google's sign-in accepts, and that's signed with Apple's
+// passkey entitlement for browsers, so Touch ID passkeys work. That entitlement
+// belongs to Helium's own signature, so it's always launched as shipped, never
+// re-signed or bundled. It updates itself. Without it, Google Chrome.
+// BROWSERBEAR_AGENT_APP picks another (a path to an .app).
+function agentApp() {
+  const want = process.env.BROWSERBEAR_AGENT_APP;
+  if (want) return want;
+  for (const dir of ['/Applications', path.join(os.homedir(), 'Applications')]) {
+    const helium = path.join(dir, 'Helium.app');
+    if (fs.existsSync(helium)) return helium;
+  }
+  return 'Google Chrome';
+}
+export const APP = agentApp();
+export const BROWSER_NAME = path.basename(APP).replace(/\.app$/, '');
+
+// Its windows are real windows on Mike's screens, opened behind whatever he's
+// using (8 Nov: the parked windows streamed into Threadbear's panel are gone).
+// --no-startup-window: otherwise the first window comes up in front of him.
+// The backgrounding switches keep a covered window drawing and taking input,
+// which agents need when their window is behind his (checked on Tinker Desk).
 const CHROME_FLAGS = [
   `--user-data-dir=${PROFILE}`,
   `--remote-debugging-port=${PORT}`,
   '--no-first-run',
   '--no-default-browser-check',
+  '--no-startup-window',
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
   '--disable-background-timer-throttling',
-  `--window-size=${WIDTH},${HEIGHT}`,
-  `--window-position=${PARK.left},${PARK.top}`,
 ];
 
 fs.mkdirSync(PROFILE, { recursive: true, mode: 0o700 });
@@ -64,14 +80,14 @@ async function browserWsUrl() {
 async function ensureChrome() {
   let url = await browserWsUrl();
   if (url) return url;
-  log('starting Chrome');
-  // -g: don't bring it to the front. -n: a second copy beside Mike's.
-  spawn('open', ['-g', '-n', '-a', 'Google Chrome', '--args', ...CHROME_FLAGS, 'about:blank'], { stdio: 'ignore' });
+  log('starting', APP);
+  // -g: don't bring it to the front. -n: a copy of its own, beside any Mike runs.
+  spawn('open', ['-g', '-n', '-a', APP, '--args', ...CHROME_FLAGS], { stdio: 'ignore' });
   for (let i = 0; i < 100 && !url; i++) {
     await sleep(200);
     url = await browserWsUrl();
   }
-  if (!url) throw new Error("the agent's Chrome didn't start");
+  if (!url) throw new Error(`the agents' browser (${BROWSER_NAME}) didn't start`);
   return url;
 }
 
@@ -161,8 +177,7 @@ function track(info) {
     tab = { tabId, targetId: info.targetId, status: 'complete', handoffs: 0, openedAt: Date.now(), thread: owners[info.targetId] };
     known.set(tabId, tab);
     byTarget.set(info.targetId, tabId);
-    // A popup (a Google sign-in, say) belongs to the thread that opened it,
-    // and has to be parked like any other window or it lands on Mike's screen.
+    // A popup (a Google sign-in, say) belongs to the thread that opened it.
     if (info.openerId) {
       own(tab, known.get(byTarget.get(info.openerId))?.thread);
       tab.popup = true;
@@ -192,7 +207,7 @@ let writing = null;
 function writeState() {
   writing ||= setTimeout(() => {
     writing = null;
-    const tabs = [...known.values()].map(({ tabId, targetId, url, title, thread, mark, status, handoffs, openedAt, popup, sheet }) => ({
+    const tabs = [...known.values()].map(({ tabId, targetId, url, title, thread, mark, status, handoffs, openedAt, popup }) => ({
       tabId,
       targetId,
       url,
@@ -205,20 +220,11 @@ function writeState() {
       handoffs,
       openedAt,
       popup: !!popup,
-      // Chrome has a window of its own up over this page (a passkey, say),
-      // which the panel's picture can't show: `moved` when it's been brought
-      // onto Mike's screen for him.
-      sheet: sheet ? { moved: !!sheet.moved, since: sheet.since } : null,
     }));
     const tmp = `${STATE}.${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify({ port: PORT, socket: SOCKET, pid: process.pid, chromePid, tabs }));
+    fs.writeFileSync(tmp, JSON.stringify({ port: PORT, socket: SOCKET, pid: process.pid, chromePid, browser: BROWSER_NAME, tabs }));
     fs.renameSync(tmp, STATE);
   }, 50);
-}
-
-async function park(targetId) {
-  const { windowId } = await browserCall('Browser.getWindowForTarget', { targetId });
-  await browserCall('Browser.setWindowBounds', { windowId, bounds: PARK });
 }
 
 async function sessionFor(tab) {
@@ -228,7 +234,7 @@ async function sessionFor(tab) {
   sessions.set(tab.targetId, sessionId);
   sessionTarget.set(sessionId, tab.targetId);
   await browserCall('Page.enable', {}, sessionId);
-  // So the page behaves as if it's in front, though Chrome's window never is.
+  // So the page behaves as if it's in front when its window is behind others.
   await browserCall('Emulation.setFocusEmulationEnabled', { enabled: true }, sessionId).catch(() => {});
   const tree = await browserCall('Page.getFrameTree', {}, sessionId).catch(() => null);
   tab.mainFrame = tree?.frameTree?.frame?.id;
@@ -270,10 +276,7 @@ async function goTo(tab, url) {
 function onEvent(m) {
   const { method, params, sessionId } = m;
   if (method === 'Target.targetCreated' || method === 'Target.targetInfoChanged') {
-    const tab = track(params.targetInfo);
-    if (tab && method === 'Target.targetCreated' && tab.popup) {
-      park(tab.targetId).catch((e) => log('park failed', e.message));
-    }
+    track(params.targetInfo);
     writeState();
     return;
   }
@@ -331,9 +334,9 @@ const ops = {
   },
 
   // One window per tab: a tab behind another in the same window stops drawing.
+  // background: behind Mike's windows, without taking his focus.
   async open({ url, thread }) {
     const { targetId } = await browserCall('Target.createTarget', { url: 'about:blank', newWindow: true, background: true, width: WIDTH, height: HEIGHT });
-    await park(targetId).catch((e) => log('park failed', e.message));
     const { targetInfos } = await browserCall('Target.getTargets');
     const tab = track(targetInfos.find((t) => t.targetId === targetId));
     own(tab, thread);
@@ -351,8 +354,28 @@ const ops = {
     return tabInfo(tabOf(tabId));
   },
 
+  // Brings the page's real window to the front, and the browser with it
+  // (Page.bringToFront activates the app too). For "Show window" in
+  // Threadbear's Browser panel.
   async focus({ tabId }) {
-    return tabInfo(tabOf(tabId));
+    const tab = tabOf(tabId);
+    await browserCall('Page.bringToFront', {}, await sessionFor(tab));
+    return tabInfo(tab);
+  },
+
+  // A small picture of the page for the Browser panel's list: a JPEG about
+  // `width` points wide. Works with the window covered.
+  async still({ tabId, width = 480 }) {
+    const session = await sessionFor(tabOf(tabId));
+    const metrics = await browserCall('Page.getLayoutMetrics', {}, session, 5_000);
+    const view = metrics.cssVisualViewport || metrics.visualViewport;
+    const scale = Math.min(1, Math.max(120, Number(width) || 480) / view.clientWidth);
+    const { data } = await browserCall('Page.captureScreenshot', {
+      format: 'jpeg',
+      quality: 60,
+      clip: { x: view.pageX, y: view.pageY, width: view.clientWidth, height: view.clientHeight, scale },
+    }, session, 8_000);
+    return { data, at: Date.now() };
   },
 
   async reload() {
@@ -365,12 +388,13 @@ const ops = {
     return true;
   },
 
-  // No tab to move and no window to bring up: the panel in Threadbear is where
-  // Mike does it. It watches this count and opens itself.
+  // The page's own window comes to the front for Mike (a sign-in, a passkey,
+  // a payment), with any of the browser's own sheets on it.
   async handoff({ tabId }) {
     const tab = tabOf(tabId);
     tab.handoffs += 1;
     writeState();
+    await browserCall('Page.bringToFront', {}, await sessionFor(tab)).catch((e) => log('bringToFront failed', e.message));
     return tabInfo(tab);
   },
 
@@ -401,113 +425,9 @@ const ops = {
   },
 
   async download() {
-    throw new Error("download isn't in the agent's Chrome yet: use a link click, which lands in its Downloads folder");
+    throw new Error(`download isn't in the agents' browser (${BROWSER_NAME}) yet: use a link click, which lands in its Downloads folder`);
   },
 };
-
-// ---- Chrome's own windows ----
-// See sheets.mjs. A window that's there for two looks in a row counts, so a
-// menu or a bubble that comes and goes as the agent types doesn't drag a
-// window onto Mike's screen.
-
-const sheetLooks = new Map(); // tabId -> { seen, gone }
-// Sheet window id -> tabs it was matched to but didn't follow when moved.
-const wrongTabs = new Map();
-
-async function lookForSheets({ windows, screens, focus }) {
-  const tabWindows = [];
-  for (const tab of known.values()) {
-    const w = await browserCall('Browser.getWindowForTarget', { targetId: tab.targetId }, undefined, 5_000).catch(() => null);
-    if (w) tabWindows.push({ tabId: tab.tabId, windowId: w.windowId, bounds: w.bounds, thread: tab.thread, activeAt: tab.activeAt });
-  }
-  // A sheet stays with the tab it was first seen over, so it can't be handed
-  // to another window parked nearby while its own is being moved.
-  const claimed = new Map([...known.values()].filter((t) => t.sheet).map((t) => [t.sheet.windowId, t.tabId]));
-  for (const id of wrongTabs.keys()) if (!windows.some((w) => w.id === id)) wrongTabs.delete(id);
-  const sheets = findSheets(windows, tabWindows, screens, claimed, wrongTabs);
-  for (const t of tabWindows) {
-    const tab = known.get(t.tabId);
-    if (!tab) continue;
-    const look = sheetLooks.get(t.tabId) ?? { seen: 0, gone: 0, strays: 0 };
-    sheetLooks.set(t.tabId, look);
-    if (!sheets.has(t.tabId)) {
-      look.seen = 0;
-      if (tab.sheet && ++look.gone >= 2) await sheetClosed(tab, t, look);
-      continue;
-    }
-    look.gone = 0;
-    const sheet = sheets.get(t.tabId);
-    if (tab.sheet?.moved) {
-      // A sheet follows its own window, so one that's stayed put after two
-      // looks belongs to another page parked in the same corner: put this
-      // one back and let the next look match it again without it.
-      if (sitsOn(sheet, t.bounds)) tab.sheet.checked = true;
-      else if (!tab.sheet.checked && ++look.strays >= 2) {
-        log('sheet', sheet.id, "didn't follow tab", tab.tabId);
-        if (!wrongTabs.has(sheet.id)) wrongTabs.set(sheet.id, new Set());
-        wrongTabs.get(sheet.id).add(tab.tabId);
-        await sheetClosed(tab, t, look);
-      }
-      continue;
-    }
-    if (tab.sheet || ++look.seen < 2) continue;
-    tab.sheet = { since: Date.now(), moved: null, windowId: sheet.id };
-    log('sheet over tab', tab.tabId, JSON.stringify(sheet));
-    // Its window is already where Mike can see it (the panel's "show the real
-    // window"), so leave it be.
-    if (onScreen(t.bounds, screens) < 0.5) {
-      // Full size: Chrome cuts a parked window's height down to what fits
-      // (375 points on Tinker Desk), and the sheet's taller than that.
-      const to = placeOn(focus, { width: WIDTH, height: HEIGHT });
-      const ok = await browserCall('Browser.setWindowBounds', { windowId: t.windowId, bounds: to }).then(
-        () => true,
-        (e) => log('sheet move failed', e.message),
-      );
-      // Not moved: try again on the next looks rather than say it's there.
-      if (!ok) {
-        tab.sheet = null;
-        look.seen = 0;
-        continue;
-      }
-      tab.sheet.moved = to;
-      look.strays = 0;
-      log('brought tab', tab.tabId, 'to', JSON.stringify(to));
-    }
-    writeState();
-  }
-  for (const tabId of sheetLooks.keys()) if (!known.has(tabId)) sheetLooks.delete(tabId);
-}
-
-async function sheetClosed(tab, t, look) {
-  const moved = tab.sheet.moved;
-  tab.sheet = null;
-  look.gone = 0;
-  look.strays = 0;
-  log('sheet gone from tab', tab.tabId);
-  // Back off screen, unless Mike's moved it since, or asked for it with the
-  // panel's button, in which case it's where he wants it.
-  if (moved && Math.abs(t.bounds.left - moved.left) <= 2 && Math.abs(t.bounds.top - moved.top) <= 2) {
-    await browserCall('Browser.setWindowBounds', { windowId: t.windowId, bounds: PARK }).catch((e) => log('park failed', e.message));
-  }
-  writeState();
-}
-
-function watchSheets() {
-  if (!chromePid) return log('no Chrome pid, so no sheet watch');
-  let busy = false;
-  watchWindows(
-    chromePid,
-    (look) => {
-      // A slow CDP answer skips a look rather than stacking them up.
-      if (busy) return;
-      busy = true;
-      lookForSheets(look)
-        .catch((e) => log('sheet look failed', e.message))
-        .finally(() => (busy = false));
-    },
-    { log },
-  );
-}
 
 // ---- The service ----
 
@@ -530,7 +450,7 @@ function connectService(delay = 0) {
     const s = net.createConnection(SOCKET);
     s.on('connect', () => {
       sock = s;
-      s.write(line({ type: 'hello', instance: 'agent-chrome', email: null, name: 'agent', version: 'agent' }));
+      s.write(line({ type: 'hello', instance: 'agent-chrome', email: null, name: 'agent', browser: BROWSER_NAME, version: 'agent' }));
       log('connected to service');
     });
     s.on('data', lineReader(onService));
@@ -548,10 +468,5 @@ await connectChrome();
 chromePid = (await browserCall('SystemInfo.getProcessInfo').catch(() => null))?.processInfo?.find((p) => p.type === 'browser')?.id ?? null;
 const { targetInfos } = await browserCall('Target.getTargets');
 targetInfos.forEach(track);
-// --window-position only gets the first window part of the way (it landed
-// whole on Mike's left-hand screen), so it's parked like the others. It stays
-// open and empty, as Chrome would quit with its last window.
-await Promise.all(targetInfos.filter(isTab).map((t) => park(t.targetId).catch((e) => log('park failed', e.message))));
 writeState();
-watchSheets();
 connectService();

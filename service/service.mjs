@@ -47,7 +47,6 @@ const HANDED = path.join(HOME, 'handed.json');
 const AGENT_ONLY = path.join(HOME, 'agent-only');
 const AGENT_INSTANCE = 'agent-chrome';
 // Opt-in: handoffs of the user's own tabs go to Threadbear's Browser panel.
-const PANEL_HANDOFFS = path.join(HOME, 'handoff-in-panel');
 function agentOnlyOn() {
   return fs.existsSync(AGENT_ONLY);
 }
@@ -60,7 +59,6 @@ const setHanded = (tabId, on) => {
   try { fs.writeFileSync(HANDED, JSON.stringify([...handed]), { mode: 0o600 }); } catch (e) { log('cannot save handoffs:', e.message); }
 };
 // Popups the Browser panel saw an agent's page open, in windows of their own.
-const panelPopups = new Set();
 let nextId = 1;
 
 // Chrome's own list of profiles, so "Work" or "Profile 2" or the email
@@ -306,7 +304,6 @@ async function whose(tabId) {
   }
   if (t.agent) return { who: 'handed', t, p };
   if (claimed.has(tabId)) return { who: 'claimed', t, p };
-  if (panelPopups.has(tabId)) return { who: 'agent', t, p };
   // A popup an agent's page opened (a Google sign-in, say) is in a window of
   // its own, not BrowserBear's, but it's still the agent's to finish.
   for (let at = t, i = 0; at?.openerTabId != null && i < 5; i++) {
@@ -365,18 +362,7 @@ const marks = createMarks({
   log,
 });
 
-const panel = createPanel({
-  home: HOME, profiles: () => [...profiles.values()], call,
-  mark: tabId => marks.get(tabId), dialog: tabId => state(tabId).dialog,
-  clearDialog: tabId => { state(tabId).dialog = null; },
-  popup: (p, tab, thread) => {
-    remember(p.instance, tab);
-    bearTabs.add(tab.tabId);
-    panelPopups.add(tab.tabId);
-    marks.used(tab.tabId, thread, 'opened a new page');
-    sent(tab.tabId, tab.url);
-  },
-});
+const panel = createPanel({ home: HOME, profiles: () => [...profiles.values()], call, mark: tabId => marks.get(tabId) });
 
 // What the pill in an agent's tab says it's doing, per command.
 const USES = {
@@ -1715,9 +1701,8 @@ const commands = {
     return `tab ${tab} is at the front of BrowserBear's window, which the user may not be looking at. To have them do something in it: browserbear handoff ${tab} --wait`;
   },
 
-  // Gives a tab to the user in Threadbear's Browser panel. Chrome's own
-  // window is the fallback when the app or this page cannot use the panel.
-  // Given a URL rather than an id, it finds the agent tab already on that
+  // Gives a tab to the user: its real window comes to the front, in their own
+  // Chrome or in the agents' browser (Helium). Given a URL rather than an id, it finds the agent tab already on that
   // page (Threadbear does this for the link buttons on an agent's asks, so
   // you don't get a second tab of the same page).
   // With `wait` the CLI goes on to watch it, through handoffLook.
@@ -1725,16 +1710,9 @@ const commands = {
     const tabId = typeof tab === 'number' ? tab : await agentTabFor(tab);
     const p = await ownerOf(tabId);
     panel.remember(tabId, thread, p.instance);
-    // A tab in the user's own Chrome comes forward in their Chrome window, as
-    // it did before 5 Nov: Mike preferred that to its picture in Threadbear's
-    // Browser panel (6 Nov). `browserbear handoff-in panel` opts back in. The
-    // agent's own Chrome has no window of the user's, so it always uses the panel.
-    const usePanel = p.instance === AGENT_INSTANCE || fs.existsSync(PANEL_HANDOFFS);
-    const requested = usePanel && thread && tbPath() && await panel.prepareHandoff(tabId, p.instance) ? await showBrowserPanel(thread) : null;
-    const inPanel = Boolean(requested) || (usePanel && panel.hasViewer(tabId, p.instance));
-    panel.handedOff(tabId, p.instance, !inPanel);
+    panel.handedOff(tabId, p.instance);
     setHanded(tabId, true);
-    const t = await (inPanel ? tabNow(tabId) : call(p, 'handoff', { tabId })).catch((e) => {
+    const t = await call(p, 'handoff', { tabId }).catch((e) => {
       if (/unknown op/.test(e.message)) throw new Error(`${describe(p)} has an older BrowserBear extension; browserbear reload, then try again`);
       // You closed the tab an agent had sent there: forget it, look again.
       if (typeof tab === 'string' && /no tab with id/i.test(e.message) && sentTo.delete(tabId)) return null;
@@ -1744,8 +1722,12 @@ const commands = {
     marks.handedOff(tabId, thread);
     // It's the user's now: no more pulling it forward for real clicks.
     bearTabs.delete(tabId);
-    const handed = inPanel || p.instance === 'agent-chrome'
-      ? `tab ${tabId} is in this thread's Browser panel in Threadbear${requested?.shown || panel.hasViewer(tabId, p.instance) ? ', in front of the user' : '; it will open when they next open this thread'}: ${t.title} <${t.url}>`
+    // The agents' browser has no pill with a Done button in the page, so the
+    // thread's Browser panel opens (without taking the focus) to show one.
+    const agents = p.instance === AGENT_INSTANCE;
+    if (agents && thread && tbPath()) await showBrowserPanel(thread);
+    const handed = agents
+      ? `tab ${tabId} is in front of the user, in its own window in the agents' browser (${p.browser || 'Helium'}); Done is in this thread's Browser panel in Threadbear: ${t.title} <${t.url}>`
       : `tab ${tabId} is in front of the user, in their own Chrome window: ${t.title} <${t.url}>`;
     if (wait) return { tabId, message: `${handed}\nWaiting for them to finish; they don't need to reply. A link to the same page as well would open a second tab.` };
     return `${handed}\nSay so when you ask them; a link to the same page as well would open a second tab. To carry on by yourself when they've finished, without them replying: browserbear handoff ${tabId} --wait`;
@@ -1826,7 +1808,6 @@ const commands = {
     sentTo.delete(tab);
     claimed.delete(tab);
     setHanded(tab, false);
-    panelPopups.delete(tab);
     panel.forget(tab, p.instance);
     return `closed tab ${tab}`;
   },
@@ -1844,7 +1825,6 @@ const commands = {
 function onHostMessage(profile, msg) {
   if (profiles.get(profile.instance) !== profile) return; // a replaced host's late reply/event
   if (msg.type === 'event') {
-    panel.event(profile, msg);
     if (msg.event === 'dialog') {
       state(msg.tabId).dialog = msg.params;
       // Whatever was waiting on that tab (a navigation, a click) is stuck
@@ -1955,16 +1935,15 @@ const PUT_FIELD = `function (value, allowed) {
 }`;
 
 // Agent-only trial (Mike, 6 Nov 2026). While this file exists, agents keep
-// to the agent's own Chrome, whose pages show in Threadbear's Browser panel,
-// and Mike's own profiles are refused with what to do instead. He's trying it
+// to the agents' own browser (--profile agent), and Mike's own profiles are refused with what to do instead. He's trying it
 // on his Mac before it goes to anyone else, so it's off unless the file is
 // there: `browserbear agent-only on|off`.
 
 const PROFILE_CMDS = new Set(['open', 'tabs', 'claim', 'reload']);
 function agentOnlyRefusal(what) {
   return new Error(
-    `BrowserBear is agent-only on this Mac (Mike's trial), so ${what}. Use --profile agent: its pages show in Threadbear's Browser panel. ` +
-      `If a page needs a sign-in, open it in the agent's Chrome and run browserbear handoff <tab> --wait, so Mike signs in there once and it stays signed in. Don't send him to his own Chrome.`,
+    `BrowserBear is agent-only on this Mac (Mike's trial), so ${what}. Use --profile agent, the agents' own browser. ` +
+      `If a page needs a sign-in, open it there and run browserbear handoff <tab> --wait, so Mike signs in there once and it stays signed in. Don't send him to his own Chrome.`,
   );
 }
 async function keepToAgentChrome(cmd, args) {
@@ -1984,7 +1963,7 @@ async function onClientMessage(conn, msg) {
   let using = null; // the tab this command works in, for its marks
   busy++;
   try {
-    if (['panelAttach', 'panelCdp', 'panelWindow', 'panelResume', 'panelShowChrome'].includes(msg.cmd)) {
+    if (['panelStill', 'panelShow', 'panelAttach', 'panelCdp', 'panelWindow', 'panelResume', 'panelShowChrome'].includes(msg.cmd)) {
       conn.write(line({ id: msg.id, ok: true, result: await panel.dispatch(conn, msg) }));
       return;
     }
@@ -2044,7 +2023,7 @@ const server = net.createServer((conn) => {
           old.pending.clear();
           old.conn.destroy();
         }
-        profile = { instance: msg.instance, email: msg.email, name: msg.name || known.name || menuNames.get(msg.email), menuName: menuNames.get(msg.email), dir: known.dir, panelPopups: msg.panelPopups === true, screencast: msg.screencast === true, conn, pending: new Map() };
+        profile = { instance: msg.instance, email: msg.email, name: msg.name || known.name || menuNames.get(msg.email), menuName: menuNames.get(msg.email), dir: known.dir, browser: msg.browser, conn, pending: new Map() };
         profiles.set(msg.instance, profile);
         log('hello from', describe(profile), msg.version);
         marks.resend();
@@ -2105,14 +2084,12 @@ function watch(ino) {
     const now = fs.statSync(SOCKET, { throwIfNoEntry: false });
     if (now?.ino !== ino) {
       quitting = true;
-      await panel.close();
       log('socket gone; exiting');
       process.exit(0);
     }
     const stamp = codeStamp();
     if (busy || !stamp || stamp === code) return;
     quitting = true;
-    await panel.close();
     log('code changed; exiting so a fresh service starts');
     fs.rmSync(SOCKET, { force: true });
     process.exit(0);

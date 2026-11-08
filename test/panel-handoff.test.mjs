@@ -1,3 +1,6 @@
+// Handoffs bring the page's real window forward, and Threadbear's Browser
+// panel lists a thread's pages with a still and a Show window button (8 Nov
+// 2026: no more pages streamed into the panel).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -6,7 +9,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { startBear } from './harness.mjs';
 
-async function setup(t, { available = true, restricted = false, inPanel = true } = {}) {
+async function setup(t, { agents = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'panel-handoff-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const fake = path.join(dir, 'tb.mjs');
@@ -14,77 +17,60 @@ async function setup(t, { available = true, restricted = false, inPanel = true }
   fs.writeFileSync(fake, `#!/usr/bin/env node
 import fs from 'node:fs';
 const args = process.argv.slice(2);
-if (args[0] === 'show-panel') { fs.appendFileSync(${JSON.stringify(requests)}, JSON.stringify(args)+'\\n'); console.log(JSON.stringify({available:${available},shown:false,request:{panel:'threadbear.browser'}})); }
+if (args[0] === 'show-panel') { fs.appendFileSync(${JSON.stringify(requests)}, JSON.stringify(args)+'\\n'); console.log(JSON.stringify({available:true,shown:false,request:{panel:'threadbear.browser'}})); }
 else if (args[0] === 'list') console.log(JSON.stringify([{id:'thread-one',title:'Browser work',status:'running'}]));
 else console.log('');
 `);
-  let focused = 0;
-  let probes = 0;
+  const calls = { handoff: 0, focus: 0, still: 0, screenshot: 0, probe: 0 };
   const tab = { tabId: 8, url: 'https://example.com/check', title: 'Check', agent: true, bear: true, status: 'complete' };
   const bear = await startBear(t, async ({ op, args }) => {
     if (op === 'tabs') return [tab];
     if (op === 'open') return tab;
-    if (op === 'handoff') { focused++; return tab; }
     if (op === 'mark') return true;
-    if (op === 'probe') { probes++; return {}; }
-    if (op === 'cdp' && args.method === 'Target.getTargetInfo') {
-      if (restricted) throw new Error('Cannot attach to this target');
-      return { targetInfo: { targetId: 'target-8' } };
-    }
-    throw new Error(`unexpected ${op}`);
+    if (op in calls) calls[op]++;
+    if (op === 'handoff' || op === 'focus') return tab;
+    if (op === 'probe') return {};
+    if (op === 'still') return { data: 'c3RpbGw=', at: Date.now() };
+    if (op === 'cdp' && args.method === 'Page.getLayoutMetrics') return { cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 1280, clientHeight: 800 } };
+    if (op === 'cdp' && args.method === 'Page.captureScreenshot') { calls.screenshot++; return { data: 'c2hvdA==' }; }
+    throw new Error(`unexpected ${op} ${args?.method || ''}`);
   }, { BROWSERBEAR_TB: fake, THREADBEAR_THREAD_ID: 'thread-one' });
-  // Panel handoffs of the user's own tabs are opt-in since 6 Nov.
-  if (inPanel) fs.writeFileSync(path.join(bear.home, 'handoff-in-panel'), '');
-  const rpc = (cmd, args = {}) => new Promise((resolve, reject) => {
+  const rpc = (cmd, args = {}, thread = 'thread-one') => new Promise((resolve, reject) => {
     const conn = net.createConnection(path.join(bear.home, 'browserbear.sock'));
     let buffer = '';
-    conn.on('connect', () => conn.write(JSON.stringify({ id: 1, cmd, args, thread: 'thread-one' })+'\n'));
+    conn.on('connect', () => conn.write(JSON.stringify({ id: 1, cmd, args, thread })+'\n'));
     conn.on('data', d => { buffer += d; if (buffer.includes('\n')) { conn.end(); const m = JSON.parse(buffer.split('\n')[0]); m.ok ? resolve(m.result) : reject(new Error(m.error)); } });
     conn.on('error', reject);
   });
-  return { ...bear, rpc, tab, probes: () => probes, focused: () => focused, requests: () => fs.existsSync(requests) ? fs.readFileSync(requests, 'utf8').trim().split('\n').map(JSON.parse) : [] };
+  const profile = agents ? 'agent-chrome' : 'me@example.com';
+  if (agents) bear.fromExtension({ type: 'hello', instance: 'agent-chrome', email: null, name: 'agent', browser: 'Helium', version: 'test' });
+  // This fake opens the page but has no snapshot, which is all open complains of.
+  await assert.rejects(rpc('open', { url: 'https://example.com/check', profile }), /couldn't look at it yet/);
+  return { ...bear, rpc, tab, calls, profile, requests: () => fs.existsSync(requests) ? fs.readFileSync(requests, 'utf8').trim().split('\n').map(JSON.parse) : [] };
 }
 
-test('handoff queues the Browser panel without an existing viewer or a Chrome focus change', async t => {
+test("handoff of a tab in the user's own Chrome brings it forward there, and opens no panel", async t => {
   const b = await setup(t);
-  // This fake extension opens the page but does not implement its snapshot.
-  await assert.rejects(b.rpc('open', { url: 'https://example.com/check', profile: 'me@example.com' }), /couldn't look at it yet/);
   assert.deepEqual(b.requests(), [], 'ordinary work never opens a panel');
-  const out = await b.browserbear('handoff', '8');
-  assert.match(out, /this thread's Browser panel/);
-  assert.match(out, /next open/);
-  assert.equal(b.focused(), 0);
-  assert.deepEqual(b.requests(), [['show-panel', 'thread-one', 'browser', '--json']]);
-  const state = await b.rpc('panelState');
-  assert.equal(state.tabs[0].inChrome, false);
-  assert.equal(state.tabs[0].state, 'yours');
-});
-
-test("by default handoff brings the user's own tab forward in their Chrome, not the panel", async t => {
-  const b = await setup(t, { inPanel: false });
   assert.match(await b.browserbear('handoff', '8'), /own Chrome window/);
-  assert.equal(b.focused(), 1);
+  assert.equal(b.calls.handoff, 1);
   assert.deepEqual(b.requests(), []);
+  const state = await b.rpc('panelState');
+  assert.equal(state.tabs[0].state, 'yours');
+  assert.equal(state.tabs[0].handoffs, 1);
 });
 
-for (const options of [{ available: false }, { restricted: true }]) {
-  test(`handoff falls back to Chrome when ${options.restricted ? 'the profile cannot display the tab' : 'the Mac app is unavailable'}`, async t => {
-    const b = await setup(t, options);
-    assert.match(await b.browserbear('handoff', '8'), /own Chrome window/);
-    assert.equal(b.focused(), 1);
-    if (options.restricted) assert.deepEqual(b.requests(), []);
-  });
-}
-
-test('legacy agent Chrome still names its Browser panel when the app is unavailable', async t => {
-  const b = await setup(t, { available: false });
-  b.fromExtension({ type: 'hello', instance: 'agent-chrome', email: 'agent', version: 'test' });
-  await assert.rejects(b.rpc('open', { url: 'https://example.com/check', profile: 'agent-chrome' }), /couldn't look at it yet/);
-  assert.match(await b.browserbear('handoff', '8'), /this thread's Browser panel/);
+test("handoff in the agents' browser brings its window forward and shows the panel for Done", async t => {
+  const b = await setup(t, { agents: true });
+  const out = await b.browserbear('handoff', '8');
+  assert.match(out, /agents' browser \(Helium\)/);
+  assert.match(out, /Done is in this thread's Browser panel/);
+  assert.equal(b.calls.handoff, 1);
+  assert.deepEqual(b.requests(), [['show-panel', 'thread-one', 'browser', '--json']]);
 });
 
-test('a panel handoff wait completes on Done while the tab stays in BrowserBearâ€™s window', async t => {
-  const b = await setup(t);
+test("a handoff wait in the agents' browser completes on the panel's Done", async t => {
+  const b = await setup(t, { agents: true });
   const waiting = b.browserbear('handoff', '8', '--wait', '--timeout', '20');
   for (let i = 0; i < 100; i++) {
     if ((await b.rpc('panelState')).tabs[0]?.state === 'yours') break;
@@ -92,15 +78,44 @@ test('a panel handoff wait completes on Done while the tab stays in BrowserBearâ
   }
   await b.rpc('markDone', { tab: 8 });
   assert.match(await waiting, /clicked Done/);
-  assert.equal(b.focused(), 0);
 });
 
-test('a panel handoff wait completes when the page reaches its settled destination', async t => {
-  const b = await setup(t);
+test('a handoff wait completes when the page reaches its settled destination', async t => {
+  const b = await setup(t, { agents: true });
   const waiting = b.browserbear('handoff', '8', '--wait', '--timeout', '20');
-  for (let i = 0; i < 100 && !b.probes(); i++) await new Promise(r => setTimeout(r, 20));
+  for (let i = 0; i < 100 && !b.calls.probe; i++) await new Promise(r => setTimeout(r, 20));
   b.tab.url = 'https://example.com/finished';
   b.tab.title = 'Finished';
   assert.match(await waiting, /user has finished.*Finished/);
-  assert.equal(b.focused(), 0);
+});
+
+test("stills and Show window are only for the page's own thread", async t => {
+  const b = await setup(t, { agents: true });
+  const still = await b.rpc('panelStill', { tab: 8, profile: 'agent-chrome', width: 320 });
+  assert.equal(still.data, 'c3RpbGw=');
+  // A second ask within a few seconds gets the same picture.
+  await b.rpc('panelStill', { tab: 8, profile: 'agent-chrome' });
+  assert.equal(b.calls.still, 1);
+  await assert.rejects(b.rpc('panelStill', { tab: 8, profile: 'agent-chrome' }, 'thread-two'), /another thread/);
+  await assert.rejects(b.rpc('panelShow', { tab: 8, profile: 'agent-chrome' }, 'thread-two'), /another thread/);
+  // The same tab number in another profile isn't this one.
+  await assert.rejects(b.rpc('panelStill', { tab: 8, profile: 'someone-else' }), /another thread/);
+  await b.rpc('panelShow', { tab: 8, profile: 'agent-chrome' });
+  assert.equal(b.calls.focus, 1);
+});
+
+test("a still of the user's own Chrome tab, but none once it's handed to them", async t => {
+  const b = await setup(t);
+  const instance = (await b.rpc('panelState')).tabs[0].profile;
+  assert.equal((await b.rpc('panelStill', { tab: 8, profile: instance })).data, 'c2hvdA==');
+  assert.equal(b.calls.screenshot, 1);
+  await b.browserbear('handoff', '8');
+  // Cached, and no debugger on the page while they sign in.
+  await b.rpc('panelStill', { tab: 8, profile: instance });
+  assert.equal(b.calls.screenshot, 1);
+});
+
+test('an older Threadbear panel is told to update', async t => {
+  const b = await setup(t);
+  await assert.rejects(b.rpc('panelAttach', { tab: 8 }), /older Threadbear/);
 });
