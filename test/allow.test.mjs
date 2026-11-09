@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import net from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { matches, normalise } from '../service/allow.mjs';
@@ -98,6 +99,32 @@ test('agents keep to the allowed sites', async (t) => {
   assert.match(await asThread('th-1', 'open', 'https://news.example/'), /opened tab 5/);
   await fails(asThread('th-2', 'open', 'https://news.example/'), /isn't on the sites/);
   assert.match(await browserbear('allow'), /thread th-1: news\.example/);
+
+  // A lent tab: that thread may use that tab on its site, nothing else, until it's released.
+  const lend = (tab, to) => new Promise((resolve, reject) => {
+    const s = net.createConnection(path.join(env.BROWSERBEAR_HOME, 'browserbear.sock'));
+    s.on('connect', () => s.write(JSON.stringify({ id: 1, cmd: 'lendTo', args: { tab, to } }) + '\n'));
+    let buf = '';
+    s.on('data', (d) => {
+      buf += d;
+      if (!buf.includes('\n')) return;
+      s.end();
+      const r = JSON.parse(buf);
+      r.ok ? resolve(r.result) : reject(new Error(r.error));
+    });
+  });
+  history[2] = ['https://bank.example/'];
+  assert.match((await lend(2, 'th-3')).words, /only in this tab and only in this thread/);
+  assert.match(await asThread('th-3', 'snap', '2'), /tab 2|RootWebArea/);
+  await fails(asThread('th-4', 'snap', '2'), /tab 2 is on bank\.example, which isn't on the sites/);
+  await fails(asThread('th-3', 'open', 'https://bank.example/other'), /won't open bank\.example/);
+  assert.match(await asThread('th-3', 'allow'), /tab 2 is lent to this thread: it may be used on bank\.example in that tab only/);
+  assert.doesNotMatch(await browserbear('allow'), /^thread th-3:/m);
+  // Off the granted site, even in the lent tab, it's sent back.
+  await fails(asThread('th-3', 'eval', '2', 'location.href = "https://evil.example/"'), /sent back to https:\/\/bank\.example\//);
+  assert.equal(urls[2], 'https://bank.example/');
+  await asThread('th-3', 'release', '2');
+  await fails(asThread('th-3', 'snap', '2'), /tab 2 is on bank\.example/);
 
   // Clearing every thread's list leaves th-1's own list limiting th-1 only.
   await browserbear('allow', 'clear');

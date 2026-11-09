@@ -227,8 +227,11 @@ a real click, the agent is told about `--script`.
 BrowserBear's toolbar button opens a popup for the tab you're on. Pick a recent
 Threadbear thread (or New thread, with what you want done) and the tab is
 lent to it: claimed for that thread, so it can click and type there without
-`--user-tab`, its site goes on that thread's allowed sites, and the thread gets
-a message saying which tab it is. The tab stays yours: the thread is told not
+`--user-tab`, and granted to it, so it may use that tab on its site even when
+the site isn't on the allowed list. The grant is that tab and that thread only,
+nothing goes on the list, and it ends when the tab is released (or ✕ on its
+pill), closes, or the thread is archived or deleted. The thread gets a message
+saying which tab it is. The tab stays yours: the thread is told not
 to close it and to `release` it when it's done. Setup is a link at the bottom
 of the popup.
 
@@ -253,7 +256,9 @@ browserbear allow clear                             # every thread's list; any s
 Sites are hosts: `example.com` (that host), `*.example.com` (it and its
 subdomains), `localhost:5173` (one port). Changing the list is refused from an
 agent's thread (`THREADBEAR_THREAD_ID` set), so it's yours to change: in a
-terminal, with the popup's switch for the page's site, or by lending a tab.
+terminal, or with the popup's switch for the page's site. Lending a tab (the
+popup, or Threadbear's @ picker) grants that one tab to that thread instead of
+changing the list; `browserbear allow` lists the grants too.
 It's a guardrail against agents wandering, not a sandbox: anything on this Mac
 that can reach the service's socket could still change the file.
 

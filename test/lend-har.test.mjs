@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import net from 'node:net';
 import { createRecorder } from '../service/har.mjs';
 import { startBear } from './harness.mjs';
 
@@ -29,7 +30,7 @@ test('the toolbar popup lends a tab to a thread, or to a new one', async (t) => 
   ]));
   fs.writeFileSync(
     tb,
-    `#!/bin/sh\nprintf '%s\\0' "$@" >> '${calls}'; printf '\\036' >> '${calls}'\ncase "$1" in\n  list) cat '${dir}/list.json' ;;\n  new) echo 11111111-2222-3333-4444-555555555555 ;;\n  send) echo turn-1 ;;\nesac\n`,
+    `#!/bin/sh\nrec=$(mktemp); printf '%s\\0' "$@" > "$rec"; printf '\\036' >> "$rec"; cat "$rec" >> '${calls}'; rm -f "$rec"\ncase "$1" in\n  list) cat '${dir}/list.json' ;;\n  new) echo 11111111-2222-3333-4444-555555555555 ;;\n  send) echo turn-1 ;;\nesac\n`,
     { mode: 0o755 },
   );
   const tbCalls = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').split('\x1e').filter(Boolean).map((l) => l.split('\0').filter(Boolean)) : []);
@@ -55,7 +56,8 @@ test('the toolbar popup lends a tab to a thread, or to a new one', async (t) => 
   const send = tbCalls().find((c) => c[0] === 'send');
   assert.equal(send[1], 'th-new');
   assert.match(send[2], /^Fix the layout here\n\nI've lent you a tab in my Chrome .*tab 7, "App page" <https:\/\/app\.example\/page>.*browserbear snap 7/s);
-  assert.match(await browserbear('allow'), /thread th-new: app\.example/);
+  assert.match(await browserbear('allow'), /tab 7 is lent to thread th-new: it may be used on app\.example in that tab only/);
+  assert.doesNotMatch(await browserbear('allow'), /thread th-new: app\.example/);
   // Claimed: an act goes through without --user-tab (the type fails later, on the fake page).
   await assert.rejects(browserbear('key', '7', 'Enter'), (e) => (assert.doesNotMatch(e.stderr, /the user's own/), true));
 
@@ -135,4 +137,40 @@ test('a redirect is its own entry, and --raw keeps cookies', () => {
   assert.equal(har.log.entries[0].request.headers[0].value, 'k=v');
   assert.equal(har.log.entries[1].response.status, 200);
   assert.deepEqual(rec.finished(), ['r']);
+});
+
+test("Threadbear's @ picker lists tabs and lends one without a message", async (t) => {
+  const { browserbear, env } = await startBear(t, ({ op }) => {
+    if (op === 'tabs') {
+      return [
+        { tabId: 1, url: 'https://agent.example/', title: 'Agent tab', active: true, agent: true, bear: true },
+        { tabId: 2, url: 'https://music.example/', title: 'Music', active: false, agent: false, bear: false },
+        { tabId: 3, url: 'http://localhost:5173/', title: 'Dev', active: true, agent: false, bear: false },
+        { tabId: 4, url: 'chrome://settings/', title: 'Settings', active: false, agent: false, bear: false },
+      ];
+    }
+    if (op === 'mark') return true;
+    return {};
+  });
+  const ask = (cmd, args, thread) => new Promise((resolve, reject) => {
+    const s = net.createConnection(path.join(env.BROWSERBEAR_HOME, 'browserbear.sock'));
+    s.on('connect', () => s.write(JSON.stringify({ id: 1, cmd, args, thread }) + '\n'));
+    let buf = '';
+    s.on('data', (d) => {
+      buf += d;
+      if (!buf.includes('\n')) return;
+      s.end();
+      const r = JSON.parse(buf);
+      r.ok ? resolve(r.result) : reject(new Error(r.error));
+    });
+  });
+  await browserbear('allow', 'add', 'localhost');
+  const list = await ask('tabList', { for: 'th-9' });
+  assert.deepEqual(list.map((x) => [x.tabId, x.whose, x.allowed]), [[3, 'user', true], [2, 'user', false], [1, 'agent', false]]);
+
+  const lent = await ask('lendTo', { tab: 2, to: 'th-9' });
+  assert.match(lent.words, /tab 2, "Music" <https:\/\/music\.example\/>/);
+  assert.equal((await ask('tabList', { for: 'th-9' })).find((x) => x.tabId === 2).allowed, true);
+  assert.equal((await ask('tabList', { for: 'th-9' })).find((x) => x.tabId === 2).lentTo, 'th-9');
+  await assert.rejects(ask('lendTo', { tab: 3, to: 'th-9' }, 'th-1'), /only the user lends tabs/);
 });

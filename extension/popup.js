@@ -71,7 +71,7 @@ function render(v) {
     $('site-on').checked = Boolean(v.siteAllowed);
     $('site-label').textContent = v.restricted ? `Every agent may use ${v.site}` : `Only let agents use listed sites, starting with ${v.site}`;
     $('site-note').textContent = v.restricted
-      ? 'Agents only use sites on the list. Lending a tab lets that thread use its site.'
+      ? 'Agents only use sites on the list. A tab you lend can be used by that thread on its site, in that tab only, until it\'s released.'
       : 'Agents may use any site now.';
   }
 }

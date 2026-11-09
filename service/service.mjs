@@ -1391,10 +1391,52 @@ const remember = (instance, tab) => {
 
 // ---- Sites agents may use (allow.mjs) ----
 
-const HOW_TO_ALLOW = "Ask the user: they can allow it with BrowserBear's toolbar button in Chrome (on that page), or with `browserbear allow add <site> --thread <id>` in a terminal. Agents can't change the list, so don't work around it.";
+const HOW_TO_ALLOW = "Ask the user: to have you look at one of their tabs, they lend it to this thread (@ in Threadbear's message box, or BrowserBear's toolbar button in Chrome); to allow a whole site, `browserbear allow add <site>` in a terminal. Agents can't change the list, so don't work around it.";
 
-function offList(url, thread, what) {
-  const list = allow.check(url, thread);
+// Tabs the user lent a thread (the toolbar popup, Threadbear's @ picker): that
+// thread may use that tab on its site whatever the list says, for as long as
+// the tab stays lent. Nothing goes on the list. A grant ends when the tab is
+// released (or ✕ on its pill), closes, or the thread is archived or deleted.
+// On disk so a service restart doesn't take it away mid-job.
+const GRANTS = path.join(HOME, 'grants.json');
+const grants = new Map((() => {
+  try { return Object.entries(JSON.parse(fs.readFileSync(GRANTS, 'utf8'))).map(([k, v]) => [Number(k), v]); } catch { return []; }
+})()); // tabId -> { thread, site }
+const saveGrants = () => {
+  try { fs.writeFileSync(GRANTS, JSON.stringify(Object.fromEntries(grants)), { mode: 0o600 }); } catch (e) { log('cannot save grants:', e.message); }
+};
+function grant(tabId, thread, url) {
+  grants.set(tabId, { thread, site: siteOf(url) });
+  saveGrants();
+}
+function endGrant(tabId) {
+  if (grants.delete(tabId)) saveGrants();
+}
+// Whether a grant lets this thread use this URL in this tab.
+const granted = (url, thread, tabId) => {
+  const g = tabId != null && grants.get(tabId);
+  return Boolean(g && thread && g.thread === thread && g.site && matches(g.site, url));
+};
+// The list's refusal for a URL, unless a grant covers it.
+const blocked = (url, thread, tabId) => (granted(url, thread, tabId) ? null : allow.check(url, thread));
+
+// Grants for tabs that have closed, or threads that have been archived or
+// deleted, go. Checked every minute while there are any.
+setInterval(async () => {
+  if (!grants.size) return;
+  const tb = tbPath();
+  let live = null;
+  if (tb) {
+    try { live = new Set(JSON.parse((await runFile(tb, ['list', '--all', '--json'])) || '[]').filter((t) => !t.archivedAt && !t.archived).map((t) => t.id)); } catch {}
+  }
+  for (const [tabId, g] of [...grants]) {
+    if (live && !live.has(g.thread)) { log('grant ends, thread gone', tabId, g.thread); endGrant(tabId); continue; }
+    if ((await tabNow(tabId)) === null) endGrant(tabId);
+  }
+}, 60_000).unref();
+
+function offList(url, thread, what, tabId) {
+  const list = blocked(url, thread, tabId);
   if (!list) return null;
   return new Error(`${what} ${siteOf(url) || url}, which isn't on the sites agents may use${thread ? ' in this thread' : ''} (${list.join(', ')}). ${HOW_TO_ALLOW}`);
 }
@@ -1404,11 +1446,11 @@ function offList(url, thread, what) {
 // was on it, or to a blank page. Null when it's somewhere allowed.
 async function sendBack(tabId, thread) {
   const t = await tabNow(tabId);
-  if (!t || !allow.check(t.url, thread)) return null;
+  if (!t || !blocked(t.url, thread, tabId)) return null;
   let where = 'a blank page';
   try {
     const { currentIndex, entries } = await cdp(tabId, 'Page.getNavigationHistory');
-    const back = entries.slice(0, currentIndex).reverse().find((e) => !allow.check(e.url, thread));
+    const back = entries.slice(0, currentIndex).reverse().find((e) => !blocked(e.url, thread, tabId));
     if (back) {
       await cdp(tabId, 'Page.navigateToHistoryEntry', { entryId: back.id });
       where = back.url;
@@ -1418,7 +1460,7 @@ async function sendBack(tabId, thread) {
     await call(await ownerOf(tabId), 'navigate', { tabId, url: 'about:blank' }).catch(() => {});
   }
   await waitForReady(tabId, 10_000).catch(() => {});
-  return offList(t.url, thread, `that took tab ${tabId} to`).message.replace(/\. Ask the user/, `, so it was sent back to ${where}. Ask the user`);
+  return offList(t.url, thread, `that took tab ${tabId} to`, tabId).message.replace(/\. Ask the user/, `, so it was sent back to ${where}. Ask the user`);
 }
 
 // Commands that don't need the tab to be somewhere allowed: getting it out of
@@ -1434,6 +1476,23 @@ async function tabIn(profile, tabId) {
   if (!t) throw new Error('that tab has closed');
   return remember(profile.instance, t);
 }
+
+// Lends one of the user's tabs to a thread: claimed for it, granted to it (that
+// tab, on its site, for as long as it's lent; nothing goes on the list), and
+// marked.
+function lendTab(profile, t, thread) {
+  claimed.add(t.tabId);
+  grant(t.tabId, thread, t.url);
+  panel.remember(t.tabId, thread, profile.instance);
+  marks.used(t.tabId, thread, 'lent by you');
+  log('lent tab', t.tabId, 'to', thread);
+}
+
+const lentWords = (profile, t) =>
+  `I've lent you a tab in my Chrome (${describe(profile)}): tab ${t.tabId}, "${t.title.slice(0, 80)}" <${t.url}>. ` +
+  `It's claimed for this thread, so browserbear click, type and the rest work in it; start with \`browserbear snap ${t.tabId}\`. ` +
+  `It's my own tab: don't close it, and run \`browserbear release ${t.tabId}\` when you've finished with it. ` +
+  `You may use it on ${siteOf(t.url) || 'its page'} even if that site isn't on the allowed list, but only in this tab and only in this thread.`;
 
 const asks = {
   // What the popup shows: recent threads to lend the tab to, and whether its
@@ -1472,30 +1531,20 @@ const asks = {
     const tb = tbPath();
     if (!tb) throw new Error("Threadbear isn't on this Mac, so there's no thread to lend the tab to");
     const t = await tabIn(profile, tabId);
-    const words =
-      `I've lent you a tab in my Chrome (${describe(profile)}): tab ${tabId}, "${t.title.slice(0, 80)}" <${t.url}>. ` +
-      `It's claimed for this thread, so browserbear click, type and the rest work in it; start with \`browserbear snap ${tabId}\`. ` +
-      `It's my own tab: don't close it, and run \`browserbear release ${tabId}\` when you've finished with it.`;
+    const words = lentWords(profile, t);
     const message = text?.trim() ? `${text.trim()}\n\n${words}` : words;
     let id = thread;
-    // Claimed and allowed before the thread hears, so its first command works.
-    claimed.add(tabId);
     if (thread && thread !== 'new') {
-      const site = siteOf(t.url);
-      if (site && allow.check(t.url, thread)) allow.add([site], thread);
-      panel.remember(tabId, thread, profile.instance);
-      marks.used(tabId, thread, 'lent by you');
+      // Lent before the thread hears, so its first command works.
+      lendTab(profile, t, thread);
       if ((await runFile(tb, ['send', thread, message], 30_000)) === null) throw new Error("Threadbear didn't take the message; is the runner going?");
     } else {
+      claimed.add(tabId);
       const out = await runFile(tb, ['new', message, '--from', 'BrowserBear', '--why', 'a tab you lent it'], 30_000);
       id = UUID.exec(out || '')?.[0];
       if (!id) throw new Error("Threadbear didn't start a thread; is the runner going?");
-      const site = siteOf(t.url);
-      if (site && allow.check(t.url, id)) allow.add([site], id);
-      panel.remember(tabId, id, profile.instance);
-      marks.used(tabId, id, 'lent by you');
+      lendTab(profile, t, id);
     }
-    log('lent tab', tabId, 'to', id);
     return { thread: id };
   },
 
@@ -1516,6 +1565,7 @@ async function answerAsk(profile, msg) {
     if (!fn) throw new Error(`unknown ask ${msg.cmd}`);
     reply = { type: 'answer', rid: msg.rid, ok: true, result: await fn(profile, msg.args || {}) };
   } catch (e) {
+    log('ask failed', msg.cmd, JSON.stringify(msg.args || {}), e.message);
     reply = { type: 'answer', rid: msg.rid, ok: false, error: e.message };
   }
   if (profiles.get(profile.instance) === profile) profile.conn.write(line(reply));
@@ -1616,7 +1666,7 @@ const commands = {
     if (hits.length > 1) {
       return `several tabs match; pick one by id:\n${hits.map(({ p, t }) => `  ${t.tabId} [${describe(p)}] ${t.title.slice(0, 60)} <${t.url.slice(0, 100)}>`).join('\n')}`;
     }
-    const refused = offList(hits[0].t.url, thread, `tab ${hits[0].t.tabId} is on`);
+    const refused = offList(hits[0].t.url, thread, `tab ${hits[0].t.tabId} is on`, hits[0].t.tabId);
     if (refused) throw refused;
     claimed.add(hits[0].t.tabId);
     marks.used(hits[0].t.tabId, thread, 'looking at the page');
@@ -1762,7 +1812,7 @@ const commands = {
     }),
 
   async goto({ tab, url, thread }) {
-    const refused = offList(url, thread, "BrowserBear won't go to");
+    const refused = offList(url, thread, "BrowserBear won't go to", tab);
     if (refused) throw refused;
     const p = await ownerOf(tab);
     try {
@@ -1961,9 +2011,41 @@ const commands = {
     bearTabs.delete(tab);
     sentTo.delete(tab);
     claimed.delete(tab);
+    endGrant(tab);
     setHanded(tab, false);
     panel.forget(tab, p.instance);
     return `closed tab ${tab}`;
+  },
+
+  // For Threadbear's @ picker in the message box: every connected profile's
+  // tabs as data, the user's own first, with whether each is already lent and
+  // whether `for` (the thread being written to) may use its site.
+  async tabList({ for: forThread }) {
+    const out = [];
+    for (const p of profiles.values()) {
+      if (p.instance === AGENT_INSTANCE) continue;
+      const tabs = await call(p, 'tabs').catch(() => []);
+      for (const t of tabs) {
+        remember(p.instance, t);
+        if (!/^(https?|file):/.test(t.url)) continue;
+        const whose = handed.has(t.tabId) || (t.agent && t.bear === false) ? 'handed' : t.agent ? 'agent' : 'user';
+        out.push({ tabId: t.tabId, title: t.title, url: t.url, profile: describe(p), active: Boolean(t.active), whose, lentTo: grants.get(t.tabId)?.thread || marks.threadOf(t.tabId), allowed: !blocked(t.url, forThread, t.tabId) });
+      }
+    }
+    const rank = { user: 0, handed: 1, agent: 2 };
+    return out.sort((a, b) => rank[a.whose] - rank[b.whose] || Number(b.active) - Number(a.active));
+  },
+
+  // The picker's choice: lends the tab to that thread without a message (the
+  // user's own message says which tab), and gives back the words to put in it.
+  // Only the user lends, so not from an agent's thread.
+  async lendTo({ tab, to, thread }) {
+    if (thread) throw new Error("only the user lends tabs, so lendTo doesn't run from an agent's thread; browserbear claim is how an agent asks for one");
+    if (!to) throw new Error('say which thread to lend the tab to');
+    const p = await ownerOf(tab);
+    const t = await tabIn(p, tab);
+    lendTab(p, t, to);
+    return { tabId: t.tabId, title: t.title, url: t.url, words: lentWords(p, t) };
   },
 
   // The sites agents may use. Anyone can look; only the user changes it, so
@@ -1975,6 +2057,8 @@ const commands = {
       const mine = thread ? allow.listFor(thread) : null;
       const lines = [];
       if (mine) lines.push(mine.length ? `this thread may use: ${mine.join(', ')}` : 'this thread may use any site (no list is set)');
+      const lent = [...grants].filter(([, g]) => !thread || g.thread === thread);
+      for (const [tabId, g] of lent) lines.push(`tab ${tabId} is lent to ${thread ? 'this thread' : `thread ${g.thread}`}: it may be used on ${g.site} in that tab only, until it's released`);
       lines.push(raw.all.length ? `every thread: ${raw.all.join(', ')}` : 'every thread: any site (no list is set)');
       if (!thread) for (const [id, list] of Object.entries(raw.threads)) lines.push(`thread ${id}: ${list.join(', ')}`);
       return lines.join('\n');
@@ -2050,6 +2134,7 @@ const commands = {
   async release({ tab }) {
     await ownerOf(tab);
     claimed.delete(tab);
+    endGrant(tab);
     await marks.release(tab);
     return `let go of tab ${tab}; its marks are off`;
   },
@@ -2087,6 +2172,7 @@ function onHostMessage(profile, msg) {
     // The pill's ✕: leave this tab alone, which also takes back a claim on it.
     if (msg.event === 'mark' && msg.action === 'release') {
       claimed.delete(msg.tabId);
+      endGrant(msg.tabId);
       marks.release(msg.tabId);
     }
     if (msg.event === 'mark' && msg.action === 'done') marks.clickedDone(msg.tabId);
@@ -2231,7 +2317,7 @@ async function onClientMessage(conn, msg) {
         owner.who = 'claimed';
       }
       if (!ANYWHERE.has(msg.cmd) && allow.restricted(msg.thread)) {
-        const refused = offList(owner.t.url, msg.thread, `tab ${args.tab} is on`);
+        const refused = offList(owner.t.url, msg.thread, `tab ${args.tab} is on`, args.tab);
         if (refused) throw new Error(`${refused.message} browserbear goto ${args.tab} <an allowed page> or close ${args.tab} still work.`);
       }
       // Only looking at one of the user's tabs doesn't mark it: an eval or a

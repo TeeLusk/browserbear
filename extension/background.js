@@ -404,7 +404,9 @@ const ops = {
 // says what the agent is doing, with Open thread, Stop and ✕ (leave this
 // tab alone). Kept in session storage so a tab that navigates gets them
 // back, even after this worker has slept.
-const MARK_PREFIX = /^🐻 [^·]{1,40} · /;
+// A page with no title of its own reads back as "🐻 name ·": document.title
+// trims the trailing space.
+const MARK_PREFIX = /^🐻 [^·]{1,40} ·( |$)/;
 const DOTS = { working: '#22c55e', yours: '#f59e0b', idle: '#9ca3af' };
 
 let marks = null;
@@ -546,7 +548,7 @@ function siteIcon() {
 // draws the mark, keeps the title and icon ours while the site changes its
 // own, and with no mark puts everything back.
 function drawMark(mark, icon) {
-  const PREFIX = /^🐻 [^·]{1,40} · /;
+  const PREFIX = /^🐻 [^·]{1,40} ·( |$)/; // MARK_PREFIX, again: this runs in the page
   let m = window.__browserbearMark;
   if (!m && !mark) return;
   if (!m) {
