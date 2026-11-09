@@ -122,6 +122,7 @@ export function createMarks({ send, log }) {
 
   return {
     get(tabId) { const c = claims.get(tabId); return c ? markFor(c) : null; },
+    threadOf: (tabId) => claims.get(tabId)?.thread || null,
     // A command on the tab is starting (begin) or has finished (end).
     begin(tabId, thread, action) {
       const c = claim(tabId, thread);

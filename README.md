@@ -222,6 +222,59 @@ a real click, the agent is told about `--script`.
 
 `browserbear help` lists everything.
 
+## Lending a tab
+
+BrowserBear's toolbar button opens a popup for the tab you're on. Pick a recent
+Threadbear thread (or New thread, with what you want done) and the tab is
+lent to it: claimed for that thread, so it can click and type there without
+`--user-tab`, its site goes on that thread's allowed sites, and the thread gets
+a message saying which tab it is. The tab stays yours: the thread is told not
+to close it and to `release` it when it's done. Setup is a link at the bottom
+of the popup.
+
+## Sites agents may use
+
+`allow.json` in BrowserBear's folder lists the sites agents may use: one list
+for every thread, and one per thread that adds to it. With no list, agents may
+use any site, as before. Once there is one, `open`, `goto`, `claim` and
+`download` refuse other sites, every other command refuses a tab that's on one
+(except `goto`, `close`, `release` and `handoff`, which get it out or give it to
+you), and a click, key, eval or raw CDP call that lands a tab somewhere off the
+list sends it back to the last allowed page in its history.
+
+```sh
+browserbear allow                                   # what's allowed
+browserbear allow add localhost 127.0.0.1 '*.localhost'
+browserbear allow add stripe.com --thread <id>      # one thread only
+browserbear allow remove stripe.com --thread <id>
+browserbear allow clear                             # every thread's list; any site again
+```
+
+Sites are hosts: `example.com` (that host), `*.example.com` (it and its
+subdomains), `localhost:5173` (one port). Changing the list is refused from an
+agent's thread (`THREADBEAR_THREAD_ID` set), so it's yours to change: in a
+terminal, with the popup's switch for the page's site, or by lending a tab.
+It's a guardrail against agents wandering, not a sandbox: anything on this Mac
+that can reach the service's socket could still change the file.
+
+## Recording network traffic
+
+```sh
+browserbear har <tab> start
+browserbear har <tab> stop [file] [--bodies] [--raw]   # writes a HAR 1.2 file, prints a summary
+browserbear har <tab> status
+```
+
+While a tab records, the debugger stays on it (so in your own Chrome, its
+"started debugging" bar stays up) and its Network events go to the service.
+`stop` writes the file (0600, in `out/` unless you name one) and prints how
+many requests there were, by host, and the failed and 4xx/5xx ones. Cookies and
+auth headers are blanked unless `--raw`; bodies (response, and request ones)
+are only kept with `--bodies`, and request bodies never when `fill` signed in
+during the recording. A handoff detaches the debugger, so recording pauses
+until the agent's next command in that tab; cancelling Chrome's bar, or a
+service restart, ends it.
+
 ## Tests
 
 ```sh

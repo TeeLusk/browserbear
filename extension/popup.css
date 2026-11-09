@@ -1,0 +1,82 @@
+:root {
+  --bg: #ffffff;
+  --line: rgba(0, 0, 0, 0.08);
+  --text: #1d1d1f;
+  --muted: #6e6e73;
+  --hover: rgba(0, 0, 0, 0.05);
+  --accent: #0a84ff;
+  --amber: #f59e0b;
+  --green: #22c55e;
+  --red: #ff3b30;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #232323;
+    --line: rgba(255, 255, 255, 0.1);
+    --text: #f2f2f2;
+    --muted: #a1a1a6;
+    --hover: rgba(255, 255, 255, 0.07);
+    --red: #ff453a;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  width: 340px;
+  margin: 0;
+  padding: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.35 -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+}
+header { margin-bottom: 10px; }
+#page-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.muted { color: var(--muted); }
+h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 12px 0 6px; }
+section { border-top: 1px solid var(--line); }
+textarea {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px;
+  margin-bottom: 6px;
+}
+button.primary {
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  padding: 6px;
+  background: var(--accent);
+  color: white;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+ul { list-style: none; margin: 6px 0 0; padding: 0; max-height: 260px; overflow-y: auto; }
+li button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-radius: 6px;
+  padding: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+li button:hover:not(:disabled) { background: var(--hover); }
+.t { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.d { display: block; font-size: 11px; color: var(--muted); }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; background: var(--muted); }
+.dot.running { background: var(--green); }
+.dot.you { background: var(--amber); }
+.note { background: var(--hover); border-radius: 6px; padding: 6px; }
+label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+#status.error { color: var(--red); }
+footer { margin-top: 8px; text-align: right; }
+a { color: var(--accent); text-decoration: none; }

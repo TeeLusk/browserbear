@@ -48,6 +48,21 @@ const USAGE = `browserbear: let agents use your real Chrome profiles
                                                 (default 20 minutes; run it again to keep waiting).
   browserbear close <tab> [--user-tab]          only closes a tab an agent opened, unless --user-tab
   browserbear release <tab>                     take BrowserBear's marks off a tab and let go of it
+  browserbear har <tab> start                   record the tab's network traffic
+  browserbear har <tab> stop [file] [--bodies] [--raw]
+                                                save it as a HAR file and print a summary (failed and 4xx/5xx
+                                                requests). Cookies and auth headers are blanked unless --raw;
+                                                --bodies adds response bodies (and request bodies)
+  browserbear har <tab> status
+  browserbear allow                             the sites agents may use (for this thread, and for every thread).
+                                                With no list, any site. open, goto and claim refuse other sites,
+                                                commands refuse a tab that's on one, and a click that leads to one
+                                                is sent back. Only the user changes the list:
+  browserbear allow add|remove <site...> [--thread id]
+  browserbear allow clear [--thread id]         sites are hosts: example.com, *.example.com, localhost:5173.
+                                                Refused from an agent's thread; the toolbar button in Chrome
+                                                allows the page's site too, and lending a tab allows its site
+                                                for that thread
 
 The user's own tabs (not opened by an agent, or handed to them) can be looked at with snap, read, shot
 and eval. click, type, key, goto, upload and dialog need claim first, or --user-tab, and only when the
@@ -76,7 +91,7 @@ function parse(argv) {
       const next = argv[i + 1];
       // --group is gone (Chrome kept every group on the bookmarks bar), but
       // still eats its value so old commands don't read it as a URL.
-      if (next !== undefined && !next.startsWith('--') && ['profile', 'group', 'until-url', 'until-text', 'timeout', 'item'].includes(key)) flags[key] = argv[++i];
+      if (next !== undefined && !next.startsWith('--') && ['profile', 'group', 'until-url', 'until-text', 'timeout', 'item', 'thread'].includes(key)) flags[key] = argv[++i];
       else flags[key] = true;
     } else pos.push(a);
   }
@@ -128,6 +143,11 @@ function argsFor(cmd, pos, flags) {
       return { tab: a, url: b, filename: rest[0] };
     case 'dialog':
       return { tab: a, action: b, text: rest.join(' ') || undefined };
+    case 'allow':
+      return { action: a || 'list', sites: [b, ...rest].filter(Boolean), forThread: typeof flags.thread === 'string' ? flags.thread : undefined };
+    case 'har':
+      // The service runs in its own folder, so a file name is resolved here.
+      return { tab: a, action: b || 'start', file: rest[0] && path.resolve(rest[0]), bodies: !!flags.bodies, raw: !!flags.raw };
     default:
       return null;
   }

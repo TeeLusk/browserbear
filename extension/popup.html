@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
+    <title>BrowserBear</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <div id="page-title">BrowserBear</div>
+      <div id="page-site" class="muted"></div>
+    </header>
+
+    <section id="lend">
+      <h2>Lend this tab to a thread</h2>
+      <p id="lent" class="note" hidden></p>
+      <textarea id="text" rows="2" placeholder="What should it do? (optional)"></textarea>
+      <button id="new" class="primary">New thread</button>
+      <ul id="threads"></ul>
+      <p id="no-tb" class="muted" hidden>Threadbear isn't on this Mac, so there are no threads to lend tabs to.</p>
+    </section>
+
+    <section id="sites" hidden>
+      <h2>Sites agents may use</h2>
+      <label id="site-row"><input type="checkbox" id="site-on" /> <span id="site-label"></span></label>
+      <p id="site-note" class="muted"></p>
+    </section>
+
+    <p id="status" class="muted"></p>
+    <footer><a href="#" id="setup">Setup</a></footer>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

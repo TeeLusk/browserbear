@@ -130,6 +130,13 @@ async function onMessage(msg) {
     Object.assign(link, { host: 'up', error: null, service: true, profile: { name: msg.name || null, email: msg.email || null, dir: msg.dir || null } });
     return;
   }
+  // The service answering the toolbar popup (see asks below).
+  if (msg.type === 'answer') {
+    const waiter = asking.get(msg.rid);
+    asking.delete(msg.rid);
+    waiter?.(msg);
+    return;
+  }
   if (msg.type) return; // some other notice from a newer host or service
   const handler = ops[msg.op];
   try {
@@ -369,6 +376,20 @@ const ops = {
     return true;
   },
 
+  // Network capture for `browserbear har`: keeps the debugger on the tab
+  // (no idle detach) and passes its Network events to the service.
+  async record({ tabId, on }) {
+    if (on) {
+      recording.add(tabId);
+      await attach(tabId);
+      await chrome.debugger.sendCommand({ tabId }, 'Network.enable', { maxPostDataSize: 65536 });
+    } else {
+      recording.delete(tabId);
+      if (attached.has(tabId)) await chrome.debugger.sendCommand({ tabId }, 'Network.disable').catch(() => {});
+    }
+    return true;
+  },
+
   // Saves into Chrome's download folder (optionally a subfolder of it) and
   // waits for the file, so the agent gets a real path back.
   async download({ url, filename }) {
@@ -432,6 +453,8 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
 const COVERED = /^(Input\.|DOM\.getNodeForLocation$|Page\.captureScreenshot$)/;
 const showTimers = new Map();
 const casting = new Set(); // tabs streaming to Threadbear's Browser panel
+const recording = new Set(); // tabs whose network traffic goes to the service (har)
+const NET_EVENTS = new Set(['Network.requestWillBeSent', 'Network.requestWillBeSentExtraInfo', 'Network.responseReceived', 'Network.responseReceivedExtraInfo', 'Network.loadingFinished', 'Network.loadingFailed']);
 
 // The service went away without stopping its casts (it crashed, or was
 // killed): a still page sends no frames to notice that by, and a cast keeps
@@ -688,6 +711,8 @@ async function attach(tabId) {
       await chrome.debugger.attach({ tabId }, '1.3');
       // So dialogs (like "Leave site?") are reported from the first command.
       await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
+      // Back after a detach (a handoff, say): keep recording.
+      if (recording.has(tabId)) await chrome.debugger.sendCommand({ tabId }, 'Network.enable', { maxPostDataSize: 65536 });
     } catch (e) {
       // Already attached by us from before a worker restart is fine.
       if (!String(e?.message).includes('Another debugger is already attached')) throw e;
@@ -696,7 +721,7 @@ async function attach(tabId) {
   clearTimeout(attached.get(tabId));
   // A cast of a page that isn't changing sends no frames, and so no acks:
   // that's not idle.
-  attached.set(tabId, setTimeout(() => (casting.has(tabId) ? attach(tabId) : detach(tabId)), IDLE_DETACH_MS));
+  attached.set(tabId, setTimeout(() => (casting.has(tabId) || recording.has(tabId) ? attach(tabId) : detach(tabId)), IDLE_DETACH_MS));
 }
 
 // Points other extensions' frames in the tab at about:blank (and hides them),
@@ -752,6 +777,9 @@ async function detach(tabId) {
 
 chrome.debugger.onDetach.addListener(({ tabId }, reason) => {
   casting.delete(tabId);
+  // You cancelled Chrome's debugging bar, or the tab closed: the recording
+  // ends (the service marks the gap and keeps what it has).
+  recording.delete(tabId);
   showMarkSoon(tabId);
   clearTimeout(attached.get(tabId));
   attached.delete(tabId);
@@ -762,14 +790,14 @@ chrome.debugger.onEvent.addListener(({ tabId }, method, params) => {
   // Only what the service needs to know about; everything else stays here.
   if (method === 'Page.javascriptDialogOpening') post({ type: 'event', event: 'dialog', tabId, params });
   if (method === 'Page.javascriptDialogClosed') post({ type: 'event', event: 'dialogClosed', tabId });
+  if (recording.has(tabId) && NET_EVENTS.has(method)) post({ type: 'event', event: 'net', tabId, method, params });
   // The Browser panel's picture. Chrome sends the next one once the service
   // acks this one, so a slow panel gets fewer frames, not a queue.
   if (method === 'Page.screencastFrame' && casting.has(tabId)) post({ type: 'event', event: 'frame', tabId, params: { data: params.data, sessionId: params.sessionId } });
 });
 
 // The setup page: a checklist of what this profile still needs. It opens by
-// itself on first install, and from the toolbar button (the manifest's action
-// has no popup, so a click lands here).
+// itself on first install, and from the toolbar popup's Setup link.
 const SETUP_URL = chrome.runtime.getURL('setup.html');
 
 async function openSetup() {
@@ -779,11 +807,39 @@ async function openSetup() {
   await chrome.windows.update(tab.windowId, { focused: true });
 }
 
-chrome.action.onClicked.addListener(() => openSetup());
+// ---- The toolbar popup: lend this tab to a thread, allow its site ----
+// The popup asks here; this passes it to the service through the host and
+// hands back the answer. Only the extension's own pages can ask.
+const asking = new Map(); // rid -> resolve
+let nextAsk = 1;
+function ask(cmd, args) {
+  return new Promise((resolve) => {
+    if (!port) connect();
+    const rid = nextAsk++;
+    const timer = setTimeout(() => {
+      asking.delete(rid);
+      resolve({ ok: false, error: "BrowserBear's service on the Mac didn't answer" });
+    }, 40_000);
+    asking.set(rid, (msg) => {
+      clearTimeout(timer);
+      resolve(msg);
+    });
+    post({ type: 'ask', rid, cmd, args });
+  });
+}
 
 // The setup page polls this every second or so.
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
-  if (sender.id !== chrome.runtime.id || msg?.type !== 'setup-status') return;
+  if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(''))) return;
+  if (msg?.type === 'ask') {
+    ask(msg.cmd, msg.args).then(reply);
+    return true; // answering later
+  }
+  if (msg?.type === 'open-setup') {
+    openSetup();
+    return;
+  }
+  if (msg?.type !== 'setup-status') return;
   connect(); // in case the worker slept and lost its port
   reply({ link: { ...link } });
 });

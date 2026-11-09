@@ -22,6 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { HOME, SOCKET, line, lineReader } from '../service/wire.mjs';
+import { NET_EVENTS } from '../service/har.mjs';
 
 export const DIR = path.join(HOME, 'agent');
 const STATE = path.join(DIR, 'tabs.json');
@@ -274,6 +275,7 @@ async function sessionFor(tab) {
   await browserCall('Page.enable', {}, sessionId);
   // So the page behaves as if it's in front when its window is behind others.
   await browserCall('Emulation.setFocusEmulationEnabled', { enabled: true }, sessionId).catch(() => {});
+  if (tab.recording) await browserCall('Network.enable', { maxPostDataSize: 65536 }, sessionId).catch(() => {});
   const tree = await browserCall('Page.getFrameTree', {}, sessionId).catch(() => null);
   tab.mainFrame = tree?.frameTree?.frame?.id;
   return sessionId;
@@ -362,6 +364,7 @@ function onEvent(m) {
   }
   if (method === 'Page.javascriptDialogOpening') post({ type: 'event', event: 'dialog', tabId: tab.tabId, params });
   if (method === 'Page.javascriptDialogClosed') post({ type: 'event', event: 'dialogClosed', tabId: tab.tabId });
+  if (tab.recording && NET_EVENTS.has(method)) post({ type: 'event', event: 'net', tabId: tab.tabId, method, params });
 }
 
 // What `handoff --wait` asks: is there still a sign-in form, and is this text
@@ -468,6 +471,16 @@ const ops = {
     const session = sessions.get(tab.targetId);
     if (session) await browserCall('Target.detachFromTarget', { sessionId: session }).catch(() => {});
     sessions.delete(tab.targetId);
+    return true;
+  },
+
+  // Network capture for `browserbear har`, as the extension does it.
+  async record({ tabId, on }) {
+    const tab = tabOf(tabId);
+    tab.recording = Boolean(on);
+    const session = await sessionFor(tab);
+    if (on) await browserCall('Network.enable', { maxPostDataSize: 65536 }, session);
+    else await browserCall('Network.disable', {}, session).catch(() => {});
     return true;
   },
 
