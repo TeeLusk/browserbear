@@ -79,3 +79,26 @@ test('native framing round-trips, including split chunks', () => {
   feed(bytes.subarray(12));
   assert.deepEqual(got, [{ a: 1 }, { b: 'ü' }]);
 });
+
+test("an iframe's content goes under it, and its refs are kept apart from the page's", () => {
+  const refs = new RefMap();
+  const frameNodes = [
+    { nodeId: 'f1', role: { value: 'RootWebArea' }, childIds: ['f2'] },
+    // Backend ids start again in a frame from another site: 30 is the page's "Upload videos" too.
+    { nodeId: 'f2', parentId: 'f1', role: { value: 'button' }, name: { value: 'Pay' }, backendDOMNodeId: 30 },
+  ];
+  const inner = compact(frameNodes, refs, undefined, undefined, { frame: 'TARGET1' });
+  const iframe = { nodeId: '8', parentId: '1', role: { value: 'Iframe' }, backendDOMNodeId: 80 };
+  const lines = compact(page([iframe]), refs, undefined, undefined, { frames: new Map([[80, { label: 'js.stripe.com', lines: inner }]]) });
+  assert.deepEqual(lines.slice(-2), ['[frame js.stripe.com]', '  e1 button "Pay"']);
+  assert.equal(lines[1], 'e2 button "Upload videos"');
+  assert.equal(refs.node('e2'), 30);
+  const id = refs.node('e1');
+  assert.ok(id < 0);
+  assert.deepEqual(refs.where(id), { frame: 'TARGET1', id: 30 });
+  // The same node in the same frame keeps its ref.
+  compact(frameNodes, refs, undefined, undefined, { frame: 'TARGET1' });
+  assert.equal(refs.node('e1'), id);
+  // A frame with nothing to act on is left out.
+  assert.ok(!compact(page([iframe]), refs, undefined, undefined, { frames: new Map([[80, { label: 'ads.example', lines: [] }]]) }).some((l) => l.startsWith('[frame')));
+});

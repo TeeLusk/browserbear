@@ -392,7 +392,7 @@ const USES = {
 
 // "Post" for e12 when the last snapshot had `e12 button "Post"`.
 function labelOf(tabId, ref) {
-  const line = tabState.get(tabId)?.last?.find((l) => l.startsWith(`${ref} `));
+  const line = tabState.get(tabId)?.last?.find((l) => l.trimStart().startsWith(`${ref} `));
   const name = line && /"(.*)"/.exec(line)?.[1];
   return name ? `"${name.length > 40 ? `${name.slice(0, 39)}…` : name}"` : 'something';
 }
@@ -406,7 +406,10 @@ function hostOf(url) {
 }
 
 const state = (tabId) => {
-  if (!tabState.has(tabId)) tabState.set(tabId, { refs: new RefMap(), last: null, dialog: null });
+  // frames: target id of each frame from another site -> { session, parent (its
+  // parent frame's target id, or null for the page), owner (the iframe's
+  // backend id in the parent), url }. objects: object id -> the frame session it's from.
+  if (!tabState.has(tabId)) tabState.set(tabId, { refs: new RefMap(), last: null, dialog: null, frames: new Map(), objects: new Map() });
   return tabState.get(tabId);
 };
 
@@ -415,11 +418,38 @@ const state = (tabId) => {
 const CDP_WAIT_MS = Number(process.env.BROWSERBEAR_CDP_WAIT_MS) || 20_000;
 const PROBE_MS = Math.min(4_000, CDP_WAIT_MS);
 
-async function cdp(tabId, method, params, timeoutMs = CDP_WAIT_MS) {
+// session: a frame from another site's own debugger session. A ref's negative
+// id (snapshot.mjs's RefMap) picks that session by itself, as does an object
+// that came from one.
+async function cdp(tabId, method, params, timeoutMs = CDP_WAIT_MS, session = null) {
   const p = await ownerOf(tabId);
+  const s = state(tabId);
+  let frame = null;
+  if (params?.backendNodeId < 0) {
+    const w = s.refs.where(params.backendNodeId);
+    if (!w) throw new Error(`that ref is from a page tab ${tabId} has since left; snap ${tabId} for fresh refs`);
+    frame = w.frame;
+    params = { ...params, backendNodeId: w.id };
+  } else if (!session && params?.objectId && s.objects.has(params.objectId)) {
+    session = s.objects.get(params.objectId);
+  }
+  if (frame) session = await frameSession(p, tabId, frame);
   try {
-    return await send(p, tabId, method, params, timeoutMs);
+    if (!session) return await send(p, tabId, method, params, timeoutMs);
+    let r;
+    try {
+      r = await call(p, 'cdp', { tabId, sessionId: session, method, params }, timeoutMs);
+    } catch (e) {
+      // The frame's session from before the extension let go of the tab (30 s
+      // idle): look its session up again and send once more.
+      if (!frame || !/session/i.test(e.message)) throw e;
+      r = await call(p, 'cdp', { tabId, sessionId: await frameSession(p, tabId, frame, true), method, params }, timeoutMs);
+    }
+    for (const o of [r?.object, r?.result]) if (o?.objectId) s.objects.set(o.objectId, session);
+    if (s.objects.size > 5_000) s.objects.clear();
+    return r;
   } catch (e) {
+    if (session && /session/i.test(e.message)) throw new Error(`that ref is in a frame tab ${tabId} no longer has; snap ${tabId} for fresh refs`);
     // A ref from before the tab went to another page, which Chrome only
     // reports as "Node with given id does not belong to the document".
     if (/does not belong to the document|No node with given id|Could not find node with given id/.test(e.message)) {
@@ -527,24 +557,46 @@ const pageAnswers = (p, tabId) =>
 // Is the element at (x, y) the one we mean, or something inside it? A dialog
 // still animating in, a toast or a transparent overlay can sit on top, and a
 // real click then lands on that instead (Sentry's Remove Project dialog, 29 Oct).
+// In a frame from another site, that's asked of the frame, at its own point.
 async function hitsTarget(tabId, backendNodeId, at) {
-  const hit = await cdp(tabId, 'DOM.getNodeForLocation', { x: Math.round(at.x), y: Math.round(at.y), ignorePointerEventsNone: true }).catch(() => null);
+  const w = state(tabId).refs.where(backendNodeId);
+  const session = w ? await frameSession(await ownerOf(tabId), tabId, w.frame) : null;
+  const pt = w ? at.local : at;
+  const hit = await cdp(tabId, 'DOM.getNodeForLocation', { x: Math.round(pt.x), y: Math.round(pt.y), ignorePointerEventsNone: true }, CDP_WAIT_MS, session).catch(() => null);
   if (!hit?.backendNodeId) return { ok: false, what: 'nothing' };
-  if (hit.backendNodeId === backendNodeId) return { ok: true };
+  if (hit.backendNodeId === (w ? w.id : backendNodeId)) return { ok: true };
   const [{ object: target }, { object: top }] = await Promise.all([
     cdp(tabId, 'DOM.resolveNode', { backendNodeId }),
-    cdp(tabId, 'DOM.resolveNode', { backendNodeId: hit.backendNodeId }),
+    cdp(tabId, 'DOM.resolveNode', { backendNodeId: hit.backendNodeId }, CDP_WAIT_MS, session),
   ]);
-  const { result } = await cdp(tabId, 'Runtime.callFunctionOn', {
-    objectId: target.objectId,
-    arguments: [{ objectId: top.objectId }],
-    functionDeclaration: `function (top) {
-      const el = top.nodeType === 1 ? top : top.parentElement;
-      if (this === el || this.contains(el)) return '';
-      return (el.getAttribute('aria-label') || el.tagName.toLowerCase()) + (el.id ? '#' + el.id : '');
-    }`,
-    returnByValue: true,
-  });
+  const NAME = `(el.getAttribute('aria-label') || el.tagName.toLowerCase()) + (el.id ? '#' + el.id : '')`;
+  let result;
+  try {
+    ({ result } = await cdp(tabId, 'Runtime.callFunctionOn', {
+      objectId: target.objectId,
+      arguments: [{ objectId: top.objectId }],
+      functionDeclaration: `function (top) {
+        const el = top.nodeType === 1 ? top : top.parentElement;
+        if (this === el || this.contains(el)) return '';
+        return ${NAME};
+      }`,
+      returnByValue: true,
+    }));
+  } catch (e) {
+    if (!/same JavaScript world/.test(e.message)) throw e;
+    // The target is in a frame on the page's own site, and the page's hit test
+    // stops at the iframe. Ask the frame's own document, at the target's middle.
+    ({ result } = await cdp(tabId, 'Runtime.callFunctionOn', {
+      objectId: target.objectId,
+      functionDeclaration: `function () {
+        const r = this.getBoundingClientRect();
+        const el = this.ownerDocument.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        if (!el || this === el || this.contains(el)) return '';
+        return ${NAME};
+      }`,
+      returnByValue: true,
+    }));
+  }
   return result.value ? { ok: false, what: result.value } : { ok: true };
 }
 
@@ -647,14 +699,166 @@ async function drawn(tabId) {
   await evaluate(tabId, DRAWN).catch(() => {});
 }
 
+// Frames from another site (a card form, a sign-in, a captcha) are their own
+// debugger sessions, which the extension auto-attaches and lists. Old
+// extensions don't, and then a snapshot just has no such frames.
+async function listFrames(p, tabId) {
+  const list = await call(p, 'frames', { tabId }, 5_000).catch(() => []);
+  const s = state(tabId);
+  const target = new Map(list.map((f) => [f.sessionId, f.targetId]));
+  const was = s.frames;
+  s.frames = new Map(
+    list.map((f) => {
+      const parent = f.parent ? target.get(f.parent) ?? null : null;
+      // Still the same iframe (its parent's backend ids don't change) unless the parent's session did.
+      const keep = was.get(f.targetId);
+      return [f.targetId, { session: f.sessionId, parent, url: f.url, owner: keep?.parent === parent ? keep.owner : undefined }];
+    }),
+  );
+  return s.frames;
+}
+
+async function frameSession(p, tabId, frame, fresh = false) {
+  let f = !fresh && state(tabId).frames.get(frame);
+  if (!f) f = (await listFrames(p, tabId)).get(frame);
+  if (!f) throw new Error(`that ref is in a frame tab ${tabId} no longer has; snap ${tabId} for fresh refs`);
+  return f.session;
+}
+
+const parentSession = (tabId, frame) => {
+  const parent = state(tabId).frames.get(frame)?.parent;
+  return parent ? state(tabId).frames.get(parent)?.session ?? null : null;
+};
+
+// The iframe element a frame from another site is shown in, in its parent's session.
+async function frameOwner(tabId, frame) {
+  const f = state(tabId).frames.get(frame);
+  if (f?.owner == null) {
+    const { backendNodeId } = await cdp(tabId, 'DOM.getFrameOwner', { frameId: frame }, CDP_WAIT_MS, parentSession(tabId, frame));
+    if (f) f.owner = backendNodeId;
+    return backendNodeId;
+  }
+  return f.owner;
+}
+
+// Positions in a frame from another site are from its own top left, so a click
+// adds where each iframe up the chain is (frameOrigin). Each iframe is scrolled
+// into view first, outermost first, so the point is on screen.
+async function scrollFrames(tabId, frame) {
+  const chain = [];
+  for (let f = frame; f; f = state(tabId).frames.get(f)?.parent ?? null) chain.unshift(f);
+  for (const f of chain) await cdp(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId: await frameOwner(tabId, f) }, CDP_WAIT_MS, parentSession(tabId, f)).catch(() => {});
+  return chain;
+}
+
+async function frameOrigin(tabId, chain) {
+  let x = 0;
+  let y = 0;
+  for (const f of chain) {
+    const { model } = await cdp(tabId, 'DOM.getBoxModel', { backendNodeId: await frameOwner(tabId, f) }, CDP_WAIT_MS, parentSession(tabId, f));
+    x += model.content[0];
+    y += model.content[1];
+  }
+  return { x, y };
+}
+
+const FRAMES_MS = 4_000; // for all of a snapshot's frames together
+const FRAME_DEPTH = 4;
+function before(ms, promise) {
+  let timer;
+  const late = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error('frame took too long')), Math.max(0, ms))));
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+const frameLabel = (url) => (!url || url === 'about:blank' ? 'about:blank' : url === 'about:srcdoc' ? '(inline)' : hostOf(url));
+
+// What's in the page's iframes, for compact(): the iframe element's backend id
+// -> { label, lines }. Frames on the page's own site are in its session and read
+// by frame id; frames from another site in their own. Each document only waits
+// for the iframes in its own tree, so nothing waits on itself. A frame that
+// fails or runs out of time is left out.
+async function frameContents(tabId, p) {
+  const s = state(tabId);
+  const until = Date.now() + FRAMES_MS;
+  const left = () => until - Date.now();
+  const frames = await listFrames(p, tabId);
+  const sessionOf = (target) => (target ? frames.get(target).session : null);
+  const trees = new Map(); // session -> its frame tree, read once
+  const treeOf = (target) => {
+    const key = target ?? '';
+    if (!trees.has(key)) trees.set(key, before(left(), cdp(tabId, 'Page.getFrameTree', {}, CDP_WAIT_MS, sessionOf(target))).then((r) => r.frameTree, () => null));
+    return trees.get(key);
+  };
+
+  // Every iframe in one session (target null: the page's): owner -> { label, lines() }.
+  const maps = new Map();
+  const iframes = (target, depth) => {
+    const key = target ?? '';
+    if (!maps.has(key)) maps.set(key, list(target, depth));
+    return maps.get(key);
+  };
+  async function list(target, depth) {
+    const out = new Map();
+    if (depth >= FRAME_DEPTH || left() <= 0) return out;
+    const session = sessionOf(target);
+    const tree = await treeOf(target);
+    const kids = [];
+    const walkTree = (t) => {
+      for (const c of t?.childFrames || []) {
+        kids.push({ target, frameId: c.frame.id, url: c.frame.url });
+        walkTree(c);
+      }
+    };
+    walkTree(tree);
+    for (const [id, f] of frames) if (f.parent === target) kids.push({ target: id, frameId: null, url: f.url });
+    await Promise.all(
+      kids.map(async (c) => {
+        try {
+          const owner = c.frameId ? (await before(left(), cdp(tabId, 'DOM.getFrameOwner', { frameId: c.frameId }, CDP_WAIT_MS, session))).backendNodeId : await before(left(), frameOwner(tabId, c.target));
+          // Where a frame from another site is now: the URL it was attached
+          // with is often the about:blank it started as.
+          const url = c.frameId ? c.url : (await treeOf(c.target))?.frame.url || c.url;
+          let lines;
+          out.set(owner, { label: frameLabel(url), lines: () => (lines ??= doc(c.target, c.frameId, c.frameId ? depth : depth + 1)) });
+        } catch {}
+      }),
+    );
+    return out;
+  }
+
+  async function doc(target, frameId, depth) {
+    const { nodes } = await before(left(), cdp(tabId, 'Accessibility.getFullAXTree', frameId ? { frameId } : {}, CDP_WAIT_MS, sessionOf(target)));
+    return compact(nodes, s.refs, undefined, undefined, { frame: target, frames: await within(nodes, target, depth) });
+  }
+
+  // The iframes among these nodes, with their contents.
+  async function within(nodes, target, depth) {
+    const here = new Set(nodes.map((n) => n.backendDOMNodeId).filter(Boolean));
+    const out = new Map();
+    const all = await iframes(target, depth);
+    await Promise.all(
+      [...all].filter(([owner]) => here.has(owner)).map(async ([owner, f]) => {
+        try {
+          out.set(owner, { label: f.label, lines: await f.lines() });
+        } catch {}
+      }),
+    );
+    return out;
+  }
+
+  return { within: (nodes) => within(nodes, null, 0) };
+}
+
 async function snapshot(tabId, { full = false } = {}) {
   const s = state(tabId);
   // A JS dialog freezes the page, so every other call would just time out.
   if (s.dialog) return `tab ${tabId}\n${dialogLine(tabId, s.dialog)}`;
   await wake(tabId);
   await cdp(tabId, 'Page.enable');
-  const [{ nodes }, files] = await Promise.all([cdp(tabId, 'Accessibility.getFullAXTree'), fileInputs(tabId)]);
-  const lines = compact(nodes, s.refs, files, (await stillFilled(tabId)) || undefined);
+  const p = await ownerOf(tabId);
+  const [{ nodes }, files, frames] = await Promise.all([cdp(tabId, 'Accessibility.getFullAXTree'), fileInputs(tabId), frameContents(tabId, p).catch(() => null)]);
+  const inside = frames ? await frames.within(nodes).catch(() => new Map()) : new Map();
+  const lines = compact(nodes, s.refs, files, (await stillFilled(tabId)) || undefined, { frames: inside });
   const out = full ? { full: true, text: lines.join('\n') } : diff(s.last, lines);
   s.last = lines;
   const tab = (await call(await ownerOf(tabId), 'tabs')).find((t) => t.tabId === tabId);
@@ -752,12 +956,17 @@ async function orClosed(tabId, act) {
   }
 }
 
+// local: the same point in a frame from another site, from that frame's top left.
 async function center(tabId, backendNodeId) {
+  const w = state(tabId).refs.where(backendNodeId);
+  const chain = w ? await scrollFrames(tabId, w.frame) : [];
   await cdp(tabId, 'DOM.scrollIntoViewIfNeeded', { backendNodeId }).catch(() => {});
   const { quads } = await cdp(tabId, 'DOM.getContentQuads', { backendNodeId });
   if (!quads?.length) return null;
   const q = quads[0];
-  return { x: (q[0] + q[2] + q[4] + q[6]) / 4, y: (q[1] + q[3] + q[5] + q[7]) / 4 };
+  const local = { x: (q[0] + q[2] + q[4] + q[6]) / 4, y: (q[1] + q[3] + q[5] + q[7]) / 4 };
+  const o = chain.length ? await frameOrigin(tabId, chain) : { x: 0, y: 0 };
+  return { x: local.x + o.x, y: local.y + o.y, local, inFrame: Boolean(w) };
 }
 
 // Chrome holds back real input on tabs you can't see (15 s for one mouse
@@ -791,6 +1000,9 @@ async function clickNode(tabId, backendNodeId, { script = false, sending = () =>
   // already moves the pointer there.
   sending();
   try {
+    // Chrome sends a press to a frame from another site only once the pointer
+    // has moved over it; without this the click went nowhere (11 Nov).
+    if (at.inFrame) await cdp(tabId, 'Input.dispatchMouseEvent', { x: at.x, y: at.y, type: 'mouseMoved' }, INPUT_WAIT_MS);
     await cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' }, INPUT_WAIT_MS);
     await cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' }, INPUT_WAIT_MS);
   } catch (e) {

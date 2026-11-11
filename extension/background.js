@@ -16,6 +16,11 @@ const IDLE_DETACH_MS = 30_000;
 
 let port = null;
 const attached = new Map(); // tabId -> idle-detach timer
+// Frames from another site in each tab (a card form, a sign-in, a captcha): each
+// is its own debugger session, auto-attached, which the service reads into
+// snapshots. tabId -> Map(sessionId -> { targetId, url, parent: sessionId | null }).
+const frames = new Map();
+const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: false, flatten: true };
 // How far the chain to the Mac gets, for the setup page. An error is kept
 // through the 2 s retries until the host really answers, so the page doesn't
 // flicker between "checking" and "missing".
@@ -320,7 +325,13 @@ const ops = {
     return tabInfo(tab);
   },
 
-  async cdp({ tabId, method, params }) {
+  // The tab's frames from another site, for snapshots (see `frames` above).
+  async frames({ tabId }) {
+    await attach(tabId);
+    return [...(frames.get(tabId) || [])].map(([sessionId, f]) => ({ sessionId, ...f }));
+  },
+
+  async cdp({ tabId, sessionId, method, params }) {
     // A screencast shows the page as it draws, so the pill stays out of it
     // for as long as the cast runs, not just around one command.
     if (method === 'Page.startScreencast') { casting.add(tabId); await hideMark(tabId); }
@@ -328,7 +339,7 @@ const ops = {
     if (COVERED.test(method)) await hideMark(tabId);
     try {
       await attach(tabId);
-      return await chrome.debugger.sendCommand({ tabId }, method, params || {});
+      return await chrome.debugger.sendCommand(sessionId ? { tabId, sessionId } : { tabId }, method, params || {});
     } catch (e) {
       const message = String(e?.message);
       const refused = message.includes('URL of different extension');
@@ -347,7 +358,7 @@ const ops = {
       try {
         // Even with nothing found: the frame may have gone by itself already.
         await attach(tabId);
-        return await chrome.debugger.sendCommand({ tabId }, method, params || {});
+        return await chrome.debugger.sendCommand(sessionId ? { tabId, sessionId } : { tabId }, method, params || {});
       } catch (again) {
         // Chrome's own wording reads as if the command were wrong or the tab
         // broken, when the page is fine and BrowserBear just can't reach it.
@@ -715,9 +726,13 @@ async function attach(tabId) {
       await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
       // Back after a detach (a handoff, say): keep recording.
       if (recording.has(tabId)) await chrome.debugger.sendCommand({ tabId }, 'Network.enable', { maxPostDataSize: 65536 });
+      await autoAttach(tabId);
     } catch (e) {
-      // Already attached by us from before a worker restart is fine.
+      // Already attached by us from before a worker restart is fine. The
+      // frames went with the old worker, so they're attached afresh.
       if (!String(e?.message).includes('Another debugger is already attached')) throw e;
+      await chrome.debugger.sendCommand({ tabId }, 'Target.setAutoAttach', { ...AUTO_ATTACH, autoAttach: false }).catch(() => {});
+      await autoAttach(tabId);
     }
   }
   clearTimeout(attached.get(tabId));
@@ -769,7 +784,20 @@ async function blankExtensionFrames(tabId) {
   return ids;
 }
 
+// Chrome reports the frames already there before it answers this.
+async function autoAttach(tabId, sessionId) {
+  if (!sessionId) frames.set(tabId, new Map());
+  await chrome.debugger.sendCommand(sessionId ? { tabId, sessionId } : { tabId }, 'Target.setAutoAttach', AUTO_ATTACH).catch(() => {});
+}
+
+function forgetFrame(tabId, sessionId) {
+  const mine = frames.get(tabId);
+  if (!mine?.delete(sessionId)) return;
+  for (const [id, f] of mine) if (f.parent === sessionId) forgetFrame(tabId, id);
+}
+
 async function detach(tabId) {
+  frames.delete(tabId);
   clearTimeout(attached.get(tabId));
   // Our own detach ends a cast without an onDetach.
   if (casting.delete(tabId)) showMarkSoon(tabId);
@@ -778,6 +806,7 @@ async function detach(tabId) {
 }
 
 chrome.debugger.onDetach.addListener(({ tabId }, reason) => {
+  frames.delete(tabId);
   casting.delete(tabId);
   // You cancelled Chrome's debugging bar, or the tab closed: the recording
   // ends (the service marks the gap and keeps what it has).
@@ -788,7 +817,17 @@ chrome.debugger.onDetach.addListener(({ tabId }, reason) => {
   post({ type: 'event', event: 'detached', tabId, reason });
 });
 
-chrome.debugger.onEvent.addListener(({ tabId }, method, params) => {
+chrome.debugger.onEvent.addListener(({ tabId, sessionId }, method, params) => {
+  if (method === 'Target.attachedToTarget') {
+    if (params.targetInfo.type !== 'iframe') return;
+    frames.get(tabId)?.set(params.sessionId, { targetId: params.targetInfo.targetId, url: params.targetInfo.url, parent: sessionId || null });
+    // Its own frames from yet another site.
+    autoAttach(tabId, params.sessionId);
+    return;
+  }
+  if (method === 'Target.detachedFromTarget') return forgetFrame(tabId, params.sessionId);
+  // The frames' own sessions have nothing else the service wants.
+  if (sessionId) return;
   // Only what the service needs to know about; everything else stays here.
   if (method === 'Page.javascriptDialogOpening') post({ type: 'event', event: 'dialog', tabId, params });
   if (method === 'Page.javascriptDialogClosed') post({ type: 'event', event: 'dialogClosed', tabId });

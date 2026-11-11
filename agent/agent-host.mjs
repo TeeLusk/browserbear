@@ -135,6 +135,21 @@ let nextCdp = 1;
 const cdpWaiting = new Map();
 const sessions = new Map(); // targetId -> sessionId
 const sessionTarget = new Map(); // sessionId -> targetId
+// Frames from another site in each tab, auto-attached as the extension does:
+// frameSessions: sessionId -> { tabId, targetId, url, parent: sessionId | null }.
+const frameSessions = new Map();
+const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: false, flatten: true };
+const tabOfSession = (sessionId) => {
+  const targetId = sessionTarget.get(sessionId);
+  return targetId ? byTarget.get(targetId) : frameSessions.get(sessionId)?.tabId;
+};
+function forgetFrame(sessionId) {
+  if (!frameSessions.delete(sessionId)) return;
+  for (const [id, f] of frameSessions) if (f.parent === sessionId) forgetFrame(id);
+}
+const forgetFrames = (tabId) => {
+  for (const [id, f] of frameSessions) if (f.tabId === tabId) frameSessions.delete(id);
+};
 
 function browserCall(method, params = {}, sessionId, timeoutMs = 30_000) {
   const id = nextCdp++;
@@ -278,6 +293,7 @@ async function sessionFor(tab) {
   if (tab.recording) await browserCall('Network.enable', { maxPostDataSize: 65536 }, sessionId).catch(() => {});
   const tree = await browserCall('Page.getFrameTree', {}, sessionId).catch(() => null);
   tab.mainFrame = tree?.frameTree?.frame?.id;
+  await browserCall('Target.setAutoAttach', AUTO_ATTACH, sessionId).catch(() => {});
   return sessionId;
 }
 
@@ -336,6 +352,7 @@ function onEvent(m) {
       known.delete(tabId);
       byTarget.delete(params.targetId);
       sessions.delete(params.targetId);
+      forgetFrames(tabId);
       if (owners[params.targetId]) {
         delete owners[params.targetId];
         fs.writeFileSync(OWNERS, JSON.stringify(owners));
@@ -344,10 +361,19 @@ function onEvent(m) {
     }
     return;
   }
+  if (method === 'Target.attachedToTarget' && sessionId && params.targetInfo.type === 'iframe') {
+    const tabId = tabOfSession(sessionId);
+    if (tabId == null) return;
+    frameSessions.set(params.sessionId, { tabId, targetId: params.targetInfo.targetId, url: params.targetInfo.url, parent: sessionTarget.has(sessionId) ? null : sessionId });
+    browserCall('Target.setAutoAttach', AUTO_ATTACH, params.sessionId).catch(() => {});
+    return;
+  }
+  if (method === 'Target.detachedFromTarget' && frameSessions.has(params.sessionId)) return forgetFrame(params.sessionId);
   if (method === 'Target.detachedFromTarget') {
     const targetId = sessionTarget.get(params.sessionId);
     sessionTarget.delete(params.sessionId);
     if (targetId) sessions.delete(targetId);
+    if (targetId) forgetFrames(byTarget.get(targetId));
     return;
   }
   const targetId = sessionId && sessionTarget.get(sessionId);
@@ -453,10 +479,17 @@ const ops = {
     return r?.result?.value ?? { signInForm: null, text: false };
   },
 
-  async cdp({ tabId, method, params }) {
+  async cdp({ tabId, sessionId, method, params }) {
     const tab = tabOf(tabId);
     tab.activeAt = Date.now();
-    return browserCall(method, params || {}, await sessionFor(tab));
+    const main = await sessionFor(tab);
+    if (sessionId && frameSessions.get(sessionId)?.tabId !== tabId) throw new Error(`No session with given id ${sessionId}`);
+    return browserCall(method, params || {}, sessionId || main);
+  },
+
+  async frames({ tabId }) {
+    await sessionFor(tabOf(tabId));
+    return [...frameSessions].filter(([, f]) => f.tabId === tabId).map(([sessionId, f]) => ({ sessionId, targetId: f.targetId, url: f.url, parent: f.parent }));
   },
 
   // The panel draws these. Nothing goes in the page, so a site can't see it.
@@ -471,6 +504,7 @@ const ops = {
     const session = sessions.get(tab.targetId);
     if (session) await browserCall('Target.detachFromTarget', { sessionId: session }).catch(() => {});
     sessions.delete(tab.targetId);
+    forgetFrames(tabId);
     return true;
   },
 

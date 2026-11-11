@@ -24,24 +24,38 @@ const FLAGS = ['disabled', 'checked', 'pressed', 'selected', 'expanded', 'focuse
 const SECRET_NAME = /pass(word|code|phrase)|\bpass\b|secret|token|api.?key|cvc|cvv|card.?number|one.?time|otp/i;
 const MAX_NAME = 80;
 
-// Per-tab ref memory: backendDOMNodeId -> "eN".
+// Per-tab ref memory: backendDOMNodeId -> "eN". A node in a frame from another
+// site lives in that frame's own debugger session, where backend ids start again,
+// so it's keyed by the frame too and stands in as a negative id: service.mjs's
+// cdp() turns that back into the frame's session and its real id.
 export class RefMap {
   constructor() {
     this.byNode = new Map();
     this.byRef = new Map();
+    this.inFrame = new Map(); // negative id -> { frame, id }
     this.next = 1;
   }
-  ref(backendId) {
-    let r = this.byNode.get(backendId);
+  ref(backendId, frame = null) {
+    const key = frame ? `${frame}:${backendId}` : backendId;
+    let r = this.byNode.get(key);
     if (!r) {
       r = `e${this.next++}`;
-      this.byNode.set(backendId, r);
-      this.byRef.set(r, backendId);
+      this.byNode.set(key, r);
+      let id = backendId;
+      if (frame) {
+        id = -(this.inFrame.size + 1);
+        this.inFrame.set(id, { frame, id: backendId });
+      }
+      this.byRef.set(r, id);
     }
     return r;
   }
   node(ref) {
     return this.byRef.get(ref);
+  }
+  // For a negative id: which frame (its target id) and its id there.
+  where(id) {
+    return id < 0 ? this.inFrame.get(id) : null;
   }
 }
 
@@ -68,13 +82,24 @@ function fileInputLine(ref, f, axName, hidden) {
 }
 
 // fileInputs: backendDOMNodeId -> { id, label, accept, multiple, disabled }
-export function compact(axNodes, refs, fileInputs = new Map(), masked = new Set()) {
+// frame: the target id of the frame from another site these nodes are in, if
+// they are. frames: an iframe element's backendDOMNodeId -> its content's lines
+// ({ label, lines }), put in where the iframe is, indented under it.
+export function compact(axNodes, refs, fileInputs = new Map(), masked = new Set(), { frame = null, frames = new Map() } = {}) {
   const byId = new Map(axNodes.map((n) => [n.nodeId, n]));
   const root = axNodes.find((n) => !n.parentId) || axNodes[0];
   const lines = [];
   const seen = new Set();
   const shown = new Set(); // file inputs the tree already had
 
+  // An iframe's content goes right after it, indented. A frame left out of the
+  // tree (aria-hidden) is left out here too.
+  const put = (owner) => {
+    const inner = frames.get(owner);
+    if (!inner.lines.length) return;
+    lines.push(`[frame ${inner.label}]`);
+    for (const l of inner.lines) lines.push(`  ${l}`);
+  };
   const walk = (node) => {
     if (!node || seen.has(node.nodeId)) return;
     seen.add(node.nodeId);
@@ -83,13 +108,13 @@ export function compact(axNodes, refs, fileInputs = new Map(), masked = new Set(
     if (!node.ignored) {
       if (fileInputs.has(node.backendDOMNodeId)) {
         shown.add(node.backendDOMNodeId);
-        lines.push(fileInputLine(refs.ref(node.backendDOMNodeId), fileInputs.get(node.backendDOMNodeId), name, false));
+        lines.push(fileInputLine(refs.ref(node.backendDOMNodeId, frame), fileInputs.get(node.backendDOMNodeId), name, false));
       } else if (role === 'heading' && name) {
         lines.push(`${'#'.repeat(Math.min(Number(propValue(node, 'level')) || 2, 6))} ${name}`);
       } else if (LANDMARKS.has(role)) {
         lines.push(`[${role}${name ? ` "${name}"` : ''}]`);
       } else if (INTERACTIVE.has(role) && node.backendDOMNodeId) {
-        let text = `${refs.ref(node.backendDOMNodeId)} ${role}`;
+        let text = `${refs.ref(node.backendDOMNodeId, frame)} ${role}`;
         if (name) text += ` "${name}"`;
         const value = node.value?.value;
         if (value !== undefined && value !== '' && value !== name) {
@@ -103,11 +128,12 @@ export function compact(axNodes, refs, fileInputs = new Map(), masked = new Set(
         lines.push(text);
       }
     }
+    if (frames.has(node.backendDOMNodeId)) put(node.backendDOMNodeId);
     for (const id of node.childIds || []) walk(byId.get(id));
   };
   walk(root);
   // The rest aren't in the tree, so they're hidden; they go at the end.
-  for (const [id, f] of fileInputs) if (!shown.has(id)) lines.push(fileInputLine(refs.ref(id), f, '', true));
+  for (const [id, f] of fileInputs) if (!shown.has(id)) lines.push(fileInputLine(refs.ref(id, frame), f, '', true));
   return lines;
 }
 

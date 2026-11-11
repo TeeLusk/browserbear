@@ -106,9 +106,14 @@ export async function headlessChrome(t) {
 const CACHE = path.join(os.homedir(), 'Library', 'Caches', 'ms-playwright');
 const build = fs.existsSync(CACHE) && fs.readdirSync(CACHE).filter((d) => /^chromium-\d+$/.test(d)).sort().pop();
 const cft = build && path.join(CACHE, build, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing');
-// Playwright's Chromium, or nothing: branded Chrome won't load unpacked
+// Chrome for Testing from CFT_PATH, Playwright's old chromium-NNNN folders, or
+// @puppeteer/browsers in ~/Library/Caches/browserbear-cft (newer Playwright
+// keeps no such folder), or nothing: branded Chrome won't load unpacked
 // extensions from the command line.
-export const CFT = cft && fs.existsSync(cft) ? cft : null;
+const PUPPETEER = path.join(os.homedir(), 'Library', 'Caches', 'browserbear-cft', 'chrome');
+const pup = fs.existsSync(PUPPETEER) && fs.readdirSync(PUPPETEER).filter((d) => d.startsWith('mac_arm-')).sort().pop();
+const pupExe = pup && path.join(PUPPETEER, pup, 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing');
+export const CFT = [process.env.CFT_PATH, cft, pupExe].find((x) => x && fs.existsSync(x)) || null;
 const BEAR_ID = 'iljcldkflmlnmfhbllafbbfnchhoccok'; // from the manifest's key
 
 // The real extension in Chrome for Testing, and an inWorker(expression) that

@@ -37,6 +37,13 @@ browserbear CLI (or Threadbear)
 - Snapshots list headings and things you can click or type in, with refs (`e12`) that
   stay on the same element. After the first look you get only what changed, so most
   steps cost a few hundred tokens rather than 15k.
+- What's in iframes is in the snapshot too, indented under `[frame host]` where the
+  iframe is, and its refs work like any other. A frame from another site (a card
+  form, a sign-in, a captcha) is a debugger session of its own: the extension (and
+  the agents' browser) auto-attaches those, and a click there is aimed by adding
+  where each iframe sits, after a mouse move, since Chrome drops a press into
+  such a frame without one. Frames with nothing to act on are left out, and all of
+  a snapshot's frames get 4 s between them. After opencode Browse's iframe snapshots.
 - Everything that changes a page answers with that diff, so there's no separate look.
 - The extension detaches from a tab 30 s after its last command, so Chrome's "started
   debugging this browser" bar doesn't hang around.
