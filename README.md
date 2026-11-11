@@ -273,8 +273,14 @@ browserbear har <tab> status
 While a tab records, the debugger stays on it (so in your own Chrome, its
 "started debugging" bar stays up) and its Network events go to the service.
 `stop` writes the file (0600, in `out/` unless you name one) and prints how
-many requests there were, by host, and the failed and 4xx/5xx ones. Cookies and
-auth headers are blanked unless `--raw`; bodies (response, and request ones)
+many requests there were, by host, and the failed and 4xx/5xx ones. Unless
+`--raw`, secrets are blanked to `REDACTED` (`service/redact.mjs`, after opencode
+Browse's capture redaction): auth, cookie and secret-named headers; query and
+fragment parameters named like secrets (and `key`, `code`); path segments that
+look like tokens (JWTs, long hex or mixed-case base64); string values of JSON and
+form fields named like secrets; anything typed into a password, card or
+one-time-code field while recording; and any of those values (16+ characters)
+wherever else it turns up. Bodies (response, and request ones)
 are only kept with `--bodies`, and request bodies never when `fill` signed in
 during the recording. A handoff detaches the debugger, so recording pauses
 until the agent's next command in that tab; cancelling Chrome's bar, or a

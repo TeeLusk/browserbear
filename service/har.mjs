@@ -3,8 +3,10 @@
 // agents' browser's host) forwards only the events named in NET_EVENTS, and
 // only for tabs that are recording.
 //
-// HARs carry sign-ins, so cookies and auth headers are blanked unless `raw`,
-// request bodies are left out unless `bodies`, and the file is 0600.
+// HARs carry sign-ins, so secrets are blanked unless `raw` (redact.mjs),
+// bodies are left out unless `bodies`, and the file is 0600.
+import { createRedactor } from './redact.mjs';
+
 export const NET_EVENTS = new Set([
   'Network.requestWillBeSent',
   'Network.requestWillBeSentExtraInfo',
@@ -14,7 +16,6 @@ export const NET_EVENTS = new Set([
   'Network.loadingFailed',
 ]);
 
-const SECRET_HEADERS = /^(cookie|set-cookie|authorization|proxy-authorization|x-api-key|x-auth-token|x-csrf-token|x-xsrf-token)$/i;
 const MAX_BODY = 1_000_000;
 const MAX_BODIES = 20_000_000;
 
@@ -34,6 +35,8 @@ export function createRecorder({ tabId, url }) {
   const live = new Map(); // requestId -> the entry for its latest hop
   const extra = new Map(); // requestId -> { request, response } headers from the ExtraInfo events
   let gaps = 0;
+  // What was typed into password and one-time-code fields while recording.
+  const typed = new Set();
 
   function begin(p) {
     const e = {
@@ -56,6 +59,7 @@ export function createRecorder({ tabId, url }) {
     tabId,
     url,
     started,
+    typed,
     get count() { return entries.length; },
     gap() { gaps++; },
     on(method, p) {
@@ -84,13 +88,16 @@ export function createRecorder({ tabId, url }) {
     finished: () => entries.filter((e) => e.end != null && !e.error && e.response && live.get(e.requestId) === e).map((e) => e.requestId),
 
     build({ raw = false, bodies = null, postData = false, creator = 'BrowserBear' } = {}) {
-      const clean = (list) => (raw ? list : list.map((h) => (SECRET_HEADERS.test(h.name) ? { ...h, value: '(removed)' } : h)));
+      const r = raw ? null : createRedactor({ typed });
+      const clean = (list) => (r ? r.headers(list) : list);
+      const url = (u) => (r ? r.url(u) : u);
+      const text = (t, mime) => (r ? r.body(t, mime) : t);
       const out = entries.map((e) => {
         const x = live.get(e.requestId) === e ? extra.get(e.requestId) : null;
         const reqHeaders = headerList(x?.request || e.request.headers);
-        const r = e.response;
-        const resHeaders = headerList(x?.response || r?.headers);
-        const t = r?.timing;
+        const res = e.response;
+        const resHeaders = headerList(x?.response || res?.headers);
+        const t = res?.timing;
         // CDP times are seconds; a response's timing is ms from its requestTime.
         const total = e.end != null ? ms(e.start * 1000, e.end * 1000) : -1;
         let timings = { send: 0, wait: Math.max(0, total), receive: 0 };
@@ -109,38 +116,41 @@ export function createRecorder({ tabId, url }) {
         }
         const body = bodies?.get(e.requestId);
         const posted = postData && e.request.postData != null;
+        const reqUrl = url(e.request.url);
+        const reqMime = e.request.headers?.['Content-Type'] || e.request.headers?.['content-type'] || '';
+        const cleanRes = clean(resHeaders);
         return {
           startedDateTime: new Date((e.wallTime ?? started / 1000) * 1000).toISOString(),
           time: Math.max(0, total),
           request: {
             method: e.request.method,
-            url: e.request.url,
-            httpVersion: r?.protocol || 'unknown',
+            url: reqUrl,
+            httpVersion: res?.protocol || 'unknown',
             cookies: [],
             headers: clean(reqHeaders),
-            queryString: queryOf(e.request.url),
-            ...(posted ? { postData: { mimeType: e.request.headers?.['Content-Type'] || e.request.headers?.['content-type'] || '', text: e.request.postData } } : {}),
+            queryString: queryOf(reqUrl),
+            ...(posted ? { postData: { mimeType: reqMime, text: text(e.request.postData, reqMime) } } : {}),
             headersSize: -1,
             bodySize: posted ? Buffer.byteLength(e.request.postData) : e.request.hasPostData ? -1 : 0,
           },
           response: {
-            status: e.error ? 0 : r?.status ?? 0,
-            statusText: e.error ? e.error : r?.statusText ?? '',
-            httpVersion: r?.protocol || 'unknown',
+            status: e.error ? 0 : res?.status ?? 0,
+            statusText: e.error ? e.error : res?.statusText ?? '',
+            httpVersion: res?.protocol || 'unknown',
             cookies: [],
-            headers: clean(resHeaders),
+            headers: cleanRes,
             content: {
               size: body ? body.size : -1,
-              mimeType: r?.mimeType || '',
-              ...(body ? { text: body.text, ...(body.base64 ? { encoding: 'base64' } : {}) } : {}),
+              mimeType: res?.mimeType || '',
+              ...(body ? { text: body.base64 ? body.text : text(body.text, res?.mimeType), ...(body.base64 ? { encoding: 'base64' } : {}) } : {}),
             },
-            redirectURL: resHeaders.find((h) => /^location$/i.test(h.name))?.value || '',
+            redirectURL: cleanRes.find((h) => /^location$/i.test(h.name))?.value || '',
             headersSize: -1,
             bodySize: e.size,
           },
           cache: {},
           timings,
-          ...(r?.remoteIPAddress ? { serverIPAddress: r.remoteIPAddress } : {}),
+          ...(res?.remoteIPAddress ? { serverIPAddress: res.remoteIPAddress } : {}),
           _resourceType: e.type ? e.type.toLowerCase() : undefined,
           ...(e.error ? { _error: e.error } : {}),
         };
@@ -150,7 +160,7 @@ export function createRecorder({ tabId, url }) {
           version: '1.2',
           creator: { name: creator, version: '1' },
           pages: [],
-          entries: out,
+          entries: r ? r.known(out) : out,
           ...(gaps ? { comment: `the debugger was cut off ${gaps} time(s) while recording, so requests in those gaps are missing` } : {}),
         },
       };

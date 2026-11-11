@@ -1018,6 +1018,8 @@ const SELECT_FIELD = `
   if (field.select) field.select();
   else field.ownerDocument.getSelection().selectAllChildren(field);
   return true;`;
+// A field whose text a HAR mustn't keep (har.mjs blanks it).
+const SECRET_FIELD = `return field.type === 'password' || /password|one-time-code|cc-number|cc-csc/.test(field.autocomplete || '') || /pass(word|code|phrase)|secret|token|api.?key|cvc|cvv|card.?number|one.?time|otp/i.test([field.name, field.id, field.placeholder, field.getAttribute('aria-label'), field.labels?.[0]?.innerText].join(' '));`;
 const READ_FIELD = `return { value: field.value ?? field.innerText, rich: field.value === undefined, secret: field.type === 'password' };`;
 
 // The element itself, held on to: a code box can move focus on as soon as it has
@@ -1722,6 +1724,8 @@ const commands = {
       const chars = text.includes('\n') ? [] : [...text.replace(/[\s-]/g, '')];
       // One character too: a full box won't take it any other way.
       const boxes = chars.length ? await splitRow(tab, node).catch(() => null) : null;
+      // A recording blanks what goes into a password or code field, wherever it turns up.
+      if (recordings.has(tab) && (boxes || (await onField(tab, node, SECRET_FIELD).catch(() => false)))) recordings.get(tab).typed.add(text);
       sending();
       const { note, left } = boxes ? await typeSplit(tab, boxes, chars) : { note: replace ? await replaceText(tab, node, text) : await typeChecked(tab, node, text) };
       if (submit && !left) {
@@ -1769,6 +1773,7 @@ const commands = {
     try {
       for (const [which, value, label] of [['user', secret.username, 'username'], ['password', secret.password, 'password'], ['otp', secret.otp, 'one-time code']]) {
         if (!fields[which] || !value) continue;
+        if (which !== 'user') recordings.get(tab)?.typed.add(value);
         // Approving in 1Password takes a while; the tab may have gone
         // somewhere else meanwhile, and a login only goes to its own site.
         backendIds.push((await cdp(tab, 'DOM.describeNode', { objectId: fields[which] })).node.backendNodeId);
@@ -2123,7 +2128,7 @@ const commands = {
     const out = file || path.join(OUT, `tab-${tab}-${Date.now()}.har`);
     fs.writeFileSync(out, JSON.stringify(har, null, 2), { mode: 0o600 });
     const notes = [];
-    if (!raw) notes.push('cookies and auth headers are blanked (--raw keeps them)');
+    if (!raw) notes.push('secrets are blanked: auth headers, cookies, token-like URL parts, secret fields in bodies and what was typed into password fields (--raw keeps them)');
     if (!bodies) notes.push('no bodies (--bodies adds them)');
     if (rec.sawFill) notes.push('request bodies are left out because fill signed in while it recorded');
     return `${out}\n${rec.summary(har)}${notes.length ? `\n(${notes.join('; ')})` : ''}`;
