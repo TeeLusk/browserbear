@@ -439,18 +439,12 @@ const ops = {
     return tabInfo(tab);
   },
 
-  // A small picture of the page for the Browser panel's list: a JPEG about
-  // `width` points wide. Works with the window covered.
-  async still({ tabId, width = 480 }) {
+  // A picture of the page for the Browser panel's list, full size: the panel
+  // shrinks it. A scaled capture (clip.scale) redraws the real window at
+  // thumbnail size while it's taken. Works with the window covered.
+  async still({ tabId }) {
     const session = await sessionFor(tabOf(tabId));
-    const metrics = await browserCall('Page.getLayoutMetrics', {}, session, 5_000);
-    const view = metrics.cssVisualViewport || metrics.visualViewport;
-    const scale = Math.min(1, Math.max(120, Number(width) || 480) / view.clientWidth);
-    const { data } = await browserCall('Page.captureScreenshot', {
-      format: 'jpeg',
-      quality: 60,
-      clip: { x: view.pageX, y: view.pageY, width: view.clientWidth, height: view.clientHeight, scale },
-    }, session, 8_000);
+    const { data } = await browserCall('Page.captureScreenshot', { format: 'jpeg', quality: 50 }, session, 8_000);
     return { data, at: Date.now() };
   },
 

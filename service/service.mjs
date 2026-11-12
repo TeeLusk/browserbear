@@ -266,6 +266,15 @@ function call(profile, op, args = {}, timeoutMs = 30_000) {
   });
 }
 
+// A released tab in Mike's own Chrome is his again: off the thread's Browser
+// panel, so its stills stop re-attaching, and the debugger off now, so
+// Chrome's "started debugging" bar goes with it rather than after the idle wait.
+async function letGo(p, tabId) {
+  if (p.instance === AGENT_INSTANCE) return;
+  panel.forget(tabId, p.instance);
+  await call(p, 'detach', { tabId }, PROBE_MS).catch(() => {});
+}
+
 async function ownerOf(tabId) {
   // Agent-only: the agent's Chrome or nothing, for every command and every
   // CDP call, so a tab id that's also one of Mike's (the agent's start at
@@ -2349,10 +2358,11 @@ const commands = {
   // Takes BrowserBear's marks off a tab and lets go of it, as the pill's ✕
   // does: for one of the user's tabs an agent has finished with.
   async release({ tab }) {
-    await ownerOf(tab);
+    const p = await ownerOf(tab);
     claimed.delete(tab);
     endGrant(tab);
     await marks.release(tab);
+    await letGo(p, tab);
     return `let go of tab ${tab}; its marks are off`;
   },
 };
@@ -2391,6 +2401,7 @@ function onHostMessage(profile, msg) {
       claimed.delete(msg.tabId);
       endGrant(msg.tabId);
       marks.release(msg.tabId);
+      letGo(profile, msg.tabId);
     }
     if (msg.event === 'mark' && msg.action === 'done') marks.clickedDone(msg.tabId);
     return;

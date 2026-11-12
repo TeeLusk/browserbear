@@ -67,14 +67,13 @@ export function createPanel({ home, profiles, call, mark }) {
     return { profiles: profiles().filter(p => p.instance !== AGENT).map(p => ({ id: p.instance, name: p.name, email: p.email })), tabs: rows.flat() };
   }
 
+  // A full-size capture, which the panel shrinks to fit. A scaled one
+  // (clip.scale) makes Chrome redraw the real tab at thumbnail size while it
+  // takes it: Seller Central sat as a 250×145 picture in the corner of Mike's
+  // own window, the rest white, for as long as the panel was open (12 Nov).
   async function takeStill(own, profile, width) {
     if (profile.instance === AGENT) return call(profile, 'still', { tabId: own.tabId, width }, 10_000);
-    const metrics = await call(profile, 'cdp', { tabId: own.tabId, method: 'Page.getLayoutMetrics', params: {} }, 5_000);
-    const view = metrics.cssVisualViewport || metrics.visualViewport;
-    const scale = Math.min(1, width / view.clientWidth);
-    const { data } = await call(profile, 'cdp', { tabId: own.tabId, method: 'Page.captureScreenshot', params: {
-      format: 'jpeg', quality: 60, clip: { x: view.pageX, y: view.pageY, width: view.clientWidth, height: view.clientHeight, scale },
-    } }, 6_000);
+    const { data } = await call(profile, 'cdp', { tabId: own.tabId, method: 'Page.captureScreenshot', params: { format: 'jpeg', quality: 50 } }, 6_000);
     return { data, at: Date.now() };
   }
 
