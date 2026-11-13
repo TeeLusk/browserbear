@@ -149,6 +149,7 @@ if (!tab?.id || !/^https?:|^file:/.test(tab.url || '')) {
     // Threads from the last time it answered; a lend waits for the service.
     render({ tab: { title: tab.title, url: tab.url }, threads: st.lastThreads, tb: st.lastTb || true, site: null });
     say("BrowserBear's service on the Mac isn't up yet. A lend waits for it, with … on the toolbar.");
+    $('annotate').hidden = true; // the tools need the service to come back with them
   } else {
     const r = await ask('lendable', { tabId: tab.id });
     if (!r?.ok) say(r?.error || "BrowserBear's service on the Mac didn't answer. Setup shows what's missing.", true);
