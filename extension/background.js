@@ -133,6 +133,7 @@ async function onMessage(msg) {
     // A service that just started has no panel watching any cast of ours.
     stopCasts();
     Object.assign(link, { host: 'up', error: null, service: true, profile: { name: msg.name || null, email: msg.email || null, dir: msg.dir || null } });
+    flushLends();
     return;
   }
   // The service answering the toolbar popup (see asks below).
@@ -197,16 +198,22 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
   if (win?.type === 'normal') await chrome.storage.session.set({ userWindow: windowId });
 });
 
+// Never a minimised window: a handoff there would land where you can't see
+// it. When the remembered one won't do, the last focused window if it has a
+// tab of yours, else the window holding the tab you used most recently (after
+// opencode Browse's #230). Each lookup gets 2 s, so a stalled one can't hold
+// up the handoff.
 async function userWindow() {
   const { bearWindow, userWindow: id } = await chrome.storage.session.get(['bearWindow', 'userWindow']);
-  const last = id && (await chrome.windows.get(id).catch(() => null));
-  if (last) return last;
-  // Nothing remembered yet (Chrome just started): the last focused window,
-  // unless that's BrowserBear's, then any other normal one.
-  const focused = await chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null);
-  if (focused && focused.id !== bearWindow) return focused;
-  const all = await chrome.windows.getAll({ windowTypes: ['normal'] });
-  return all.find((w) => w.id !== bearWindow) || null;
+  const usable = (w) => w && w.type === 'normal' && w.state !== 'minimized' && w.id !== bearWindow;
+  const newest = (w) => Math.max(0, ...(w.tabs || []).map((t) => t.lastAccessed || 0));
+  const within = (promise) => Promise.race([promise.catch(() => null), new Promise((r) => setTimeout(() => r(null), 2_000))]);
+  const last = id && (await within(chrome.windows.get(id)));
+  if (usable(last)) return last;
+  const focused = await within(chrome.windows.getLastFocused({ windowTypes: ['normal'], populate: true }));
+  if (usable(focused) && focused.tabs?.length) return focused;
+  const all = ((await within(chrome.windows.getAll({ windowTypes: ['normal'], populate: true }))) || []).filter(usable);
+  return all.sort((a, b) => newest(b) - newest(a))[0] || null;
 }
 
 const ops = {
@@ -869,12 +876,93 @@ function ask(cmd, args) {
   });
 }
 
+// A lend made while the service on the Mac isn't up (Chrome just started, or
+// the service is restarting after an update) waits here rather than failing,
+// with "…" on the toolbar badge for that tab, and goes once the service says
+// hello. In session storage, so a worker that sleeps meanwhile doesn't lose
+// it. Opening the popup on that tab again can cancel it. After opencode
+// Browse's #237.
+const LENDS = 'queuedLends';
+const WAITING_TITLE = "BrowserBear is waiting for its service on the Mac to start. This tab is lent as soon as it's up; open BrowserBear again to cancel.";
+
+async function queuedLends() {
+  return (await chrome.storage.session.get(LENDS))[LENDS] || [];
+}
+
+async function badge(tabId, text, title) {
+  await chrome.action.setBadgeText({ tabId, text }).catch(() => {});
+  await chrome.action.setTitle({ tabId, title: title || 'BrowserBear' }).catch(() => {});
+}
+
+async function queueLend(args) {
+  const list = (await queuedLends()).filter((q) => q.tabId !== args.tabId);
+  await chrome.storage.session.set({ [LENDS]: [...list, { tabId: args.tabId, thread: args.thread, text: args.text || '' }] });
+  await badge(args.tabId, '…', WAITING_TITLE);
+}
+
+async function cancelLend(tabId) {
+  const list = await queuedLends();
+  if (!list.some((q) => q.tabId === tabId)) return false;
+  await chrome.storage.session.set({ [LENDS]: list.filter((q) => q.tabId !== tabId) });
+  await badge(tabId, '');
+  return true;
+}
+
+let flushing = null;
+function flushLends() {
+  flushing ||= (async () => {
+    for (let list = await queuedLends(); list.length && link.service; list = await queuedLends()) {
+      const q = list[0];
+      // Taken off first, so a cancel or a second flush can't send it twice.
+      await chrome.storage.session.set({ [LENDS]: list.slice(1) });
+      if (!(await chrome.tabs.get(q.tabId).catch(() => null))) continue;
+      const r = await ask('lend', q);
+      if (r.ok) await badge(q.tabId, '');
+      else await badge(q.tabId, '!', `BrowserBear couldn't lend this tab: ${r.error}`);
+    }
+  })().finally(() => (flushing = null));
+  return flushing;
+}
+
+// A worker started again: what's still open keeps its badge; closed tabs go.
+async function restoreLends() {
+  const list = await queuedLends();
+  const open = new Set((await chrome.tabs.query({})).map((t) => t.id));
+  const left = list.filter((q) => open.has(q.tabId));
+  if (left.length !== list.length) await chrome.storage.session.set({ [LENDS]: left });
+  for (const q of left) await badge(q.tabId, '…', WAITING_TITLE);
+}
+queue(restoreLends);
+chrome.tabs.onRemoved.addListener((tabId) => {
+  queuedLends().then((list) => list.some((q) => q.tabId === tabId) && chrome.storage.session.set({ [LENDS]: list.filter((q) => q.tabId !== tabId) }));
+});
+
 // The setup page polls this every second or so.
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(''))) return;
   if (msg?.type === 'ask') {
-    ask(msg.cmd, msg.args).then(reply);
+    // Only a lend waits for the service; the popup's looks need it now.
+    if (msg.cmd === 'lend' && !link.service) {
+      queueLend(msg.args).then(() => reply({ ok: true, result: { queued: true } }));
+      return true;
+    }
+    ask(msg.cmd, msg.args).then((r) => {
+      // Kept for when the service is down, so the popup can still offer them.
+      if (msg.cmd === 'lendable' && r.ok) chrome.storage.session.set({ lastThreads: r.result.threads, lastTb: r.result.tb });
+      reply(r);
+    });
     return true; // answering later
+  }
+  if (msg?.type === 'lend-state') {
+    (async () => {
+      const { lastThreads = [], lastTb = false } = await chrome.storage.session.get(['lastThreads', 'lastTb']);
+      reply({ service: link.service, queued: (await queuedLends()).find((q) => q.tabId === msg.tabId) || null, lastThreads, lastTb });
+    })();
+    return true;
+  }
+  if (msg?.type === 'cancel-lend') {
+    cancelLend(msg.tabId).then(reply);
+    return true;
   }
   if (msg?.type === 'open-setup') {
     openSetup();

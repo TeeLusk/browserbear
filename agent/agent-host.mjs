@@ -27,7 +27,14 @@ import { NET_EVENTS } from '../service/har.mjs';
 export const DIR = path.join(HOME, 'agent');
 const STATE = path.join(DIR, 'tabs.json');
 const IDS = path.join(DIR, 'tab-ids.json');
-const PORT = Number(process.env.BROWSERBEAR_AGENT_PORT) || 9339;
+// The debugging port. Pinned by BROWSERBEAR_AGENT_PORT; otherwise 9339, or
+// when another program holds that, the first free one up to 9346, remembered
+// in PORT_FILE so the next start finds the browser again (after opencode
+// Browse's #243).
+const PINNED = Number(process.env.BROWSERBEAR_AGENT_PORT) || null;
+const PORT_FILE = path.join(DIR, 'port');
+const SPARE_PORTS = [9340, 9341, 9342, 9343, 9344, 9345, 9346];
+let PORT = PINNED || 9339;
 const WIDTH = 1280;
 const HEIGHT = 900;
 
@@ -58,7 +65,7 @@ const PROFILE = path.join(DIR, BROWSER_NAME === 'Google Chrome' ? 'chrome-profil
 // --no-startup-window: otherwise the first window comes up in front of him.
 // The backgrounding switches keep a covered window drawing and taking input,
 // which agents need when their window is behind his (checked on Tinker Desk).
-const CHROME_FLAGS = [
+const chromeFlags = () => [
   `--user-data-dir=${PROFILE}`,
   `--remote-debugging-port=${PORT}`,
   '--no-first-run',
@@ -76,9 +83,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- Chrome ----
 
-async function browserWsUrl() {
-  const r = await fetch(`http://127.0.0.1:${PORT}/json/version`).catch(() => null);
-  return r?.ok ? (await r.json()).webSocketDebuggerUrl : null;
+async function browserWsUrl(port = PORT) {
+  const r = await fetch(`http://127.0.0.1:${port}/json/version`).catch(() => null);
+  return r?.ok ? (await r.json().catch(() => ({}))).webSocketDebuggerUrl || null : null;
+}
+
+// Something on this Mac is listening on the port (a browser or not).
+const portTaken = (port) =>
+  new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', () => resolve(true));
+    probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(false)));
+  });
+
+// Our browser on the port a fallback picked last time, if it's still there.
+async function rememberedPort() {
+  const port = Number(fs.readFileSync(PORT_FILE, 'utf8').trim()) || null;
+  if (!port || port === PORT) return null;
+  const url = await browserWsUrl(port);
+  if (!url) return null;
+  const { sock, path: exe } = await runningApp(url);
+  sock?.close();
+  return isOurApp(exe) ? port : null;
 }
 
 // The program on the debugging port, from its process list: /json/version says
@@ -105,6 +131,10 @@ async function runningApp(url) {
 const isOurApp = (exe) => !exe || (APP.includes('/') ? exe.startsWith(`${APP}/`) : exe.includes(`/${APP}.app/`));
 
 async function ensureChrome() {
+  if (!PINNED) {
+    const port = await rememberedPort().catch(() => null);
+    if (port) PORT = port;
+  }
   let url = await browserWsUrl();
   if (url) {
     // Another browser on our port: the agents' old Google Chrome from before
@@ -119,9 +149,17 @@ async function ensureChrome() {
     if (await browserWsUrl()) throw new Error(`another browser (${exe}) is on the agents' port ${PORT} and didn't close`);
     url = null;
   }
+  // Held by something that isn't a browser (another tool's relay, say).
+  if (!PINNED && (await portTaken(PORT))) {
+    const held = PORT;
+    for (const p of SPARE_PORTS) if (!(await portTaken(p))) { PORT = p; break; }
+    if (PORT === held) throw new Error(`another program holds the agents' port ${held} and ports ${SPARE_PORTS[0]}-${SPARE_PORTS.at(-1)}; BROWSERBEAR_AGENT_PORT picks another`);
+    log('port', held, 'is taken; using', PORT);
+  }
+  if (!PINNED) fs.writeFileSync(PORT_FILE, String(PORT));
   log('starting', APP);
   // -g: don't bring it to the front. -n: a copy of its own, beside any Mike runs.
-  spawn('open', ['-g', '-n', '-a', APP, '--args', ...CHROME_FLAGS], { stdio: 'ignore' });
+  spawn('open', ['-g', '-n', '-a', APP, '--args', ...chromeFlags()], { stdio: 'ignore' });
   for (let i = 0; i < 100 && !url; i++) {
     await sleep(200);
     url = await browserWsUrl();

@@ -86,3 +86,23 @@ test('--raw keeps everything', (t) => {
   const text = JSON.stringify(build(rec, reqs, { raw: true }));
   assert.ok(text.includes(ACCESS) && text.includes(REFRESH));
 });
+
+// A short value blanked by its name is blanked where a value is exactly it,
+// but not inside other text (opencode Browse #198: session=42 turned
+// "order 1423 at 4:42" into "order 1REDACTED3 at 4:REDACTED").
+test('short secret values: whole values only, never inside other text', () => {
+  const reqs = [
+    { url: 'https://app.example/a?session=4242', body: JSON.stringify({ sid: '4242', note: 'order 14242 at 4:42', echo: '4242' }) },
+    { url: 'https://app.example/b?sid=42', body: JSON.stringify({ n: '42' }) },
+  ];
+  const har = build(record(null, reqs), reqs);
+  const [a, b] = har.log.entries;
+  assert.match(a.request.url, /session=REDACTED/);
+  const body = JSON.parse(a.response.content.text);
+  assert.equal(body.sid, 'REDACTED');
+  assert.equal(body.echo, 'REDACTED');
+  assert.equal(body.note, 'order 14242 at 4:42');
+  // Too short to mean anything elsewhere: only blanked where it was named.
+  assert.match(b.request.url, /sid=REDACTED/);
+  assert.equal(JSON.parse(b.response.content.text).n, '42');
+});

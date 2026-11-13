@@ -13,7 +13,7 @@
 //     response bodies.
 //   - Then every value blanked above that's long enough to be a credential
 //     (16+ characters), wherever else it turns up (a "next" link, an echoed
-//     token), and whatever was typed into a password or one-time-code field
+//     token), shorter ones only where a value is exactly that, and whatever was typed into a password or one-time-code field
 //     while recording (`type`, `fill`), whatever its length.
 
 export const REDACTED = 'REDACTED';
@@ -63,10 +63,18 @@ export function tokenLike(segment) {
   return /\d/.test(s) && /[a-z]/.test(s) && /[A-Z]/.test(s);
 }
 
+const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 export function createRedactor({ typed = [] } = {}) {
   const found = new Set();
+  // Shorter ones (session=42) are only blanked where a value is exactly that,
+  // never inside other text: "order 1423 at 4:42" stays as it was (opencode
+  // Browse #198).
+  const exact = new Set();
   const keep = (v) => {
-    if (typeof v === 'string' && v.length >= KNOWN_MIN && v !== REDACTED) found.add(v);
+    if (typeof v !== 'string' || !v || v === REDACTED) return;
+    if (v.length >= KNOWN_MIN) found.add(v);
+    else if (v.length >= TYPED_MIN) exact.add(v);
   };
 
   function params(text, isQuery) {
@@ -165,9 +173,16 @@ export function createRedactor({ typed = [] } = {}) {
       if (json !== v) all.push(json);
     }
     all.sort((a, b) => b.length - a.length);
-    if (!all.length) return har;
+    if (!all.length && !exact.size) return har;
     const swap = (s) => {
+      if (exact.has(s)) return REDACTED;
       for (const v of all) if (s.includes(v)) s = s.split(v).join(REDACTED);
+      // Inside a body or a URL, as a whole JSON string or parameter value.
+      for (const v of exact) {
+        if (!s.includes(v)) continue;
+        s = s.split(JSON.stringify(v)).join(`"${REDACTED}"`);
+        s = s.replace(new RegExp(`=${escape(encodeURIComponent(v))}(?=[&#;]|$)`, 'g'), `=${REDACTED}`);
+      }
       return s;
     };
     const go = (x) => {

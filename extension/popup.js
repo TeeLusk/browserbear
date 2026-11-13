@@ -30,6 +30,10 @@ async function lend(thread) {
     for (const b of document.querySelectorAll('button')) b.disabled = false;
     return say(r?.error || "BrowserBear didn't answer", true);
   }
+  if (r.result?.queued) {
+    say("BrowserBear's service on the Mac isn't up yet. The tab is lent as soon as it is (… on the toolbar); open this again to cancel.");
+    return setTimeout(() => window.close(), 2500);
+  }
   say('Lent. The thread has the tab now.');
   setTimeout(() => window.close(), 900);
 }
@@ -87,15 +91,52 @@ $('site-on').addEventListener('change', async (e) => {
   say('');
 });
 
+// The service may be starting (Chrome just opened, or it's restarting after an
+// update): give it a moment, then offer what's known so a lend can wait for it.
+async function serviceUp() {
+  for (let i = 0; i < 15; i++) {
+    const st = await chrome.runtime.sendMessage({ type: 'lend-state', tabId: tab.id });
+    if (st.service || i === 14) return st;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+function renderWaiting(queued) {
+  $('sites').hidden = true;
+  $('text').hidden = true;
+  $('new').hidden = true;
+  $('threads').replaceChildren();
+  const b = Object.assign(document.createElement('button'), { className: 'primary', textContent: 'Cancel the lend' });
+  b.addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ type: 'cancel-lend', tabId: tab.id });
+    say('Cancelled.');
+    setTimeout(() => window.close(), 700);
+  });
+  const li = document.createElement('li');
+  li.append(b);
+  $('threads').append(li);
+  say(`Waiting for BrowserBear's service on the Mac to lend this tab to ${queued.thread === 'new' ? 'a new thread' : 'a thread'}.`);
+}
+
 if (!tab?.id || !/^https?:|^file:/.test(tab.url || '')) {
   say("This page can't be lent: only web pages can.");
   $('lend').hidden = true;
 } else {
   say('Loading threads…');
-  const r = await ask('lendable', { tabId: tab.id });
-  if (!r?.ok) say(r?.error || "BrowserBear's service on the Mac didn't answer. Setup shows what's missing.", true);
-  else {
-    say('');
-    render(r.result);
+  const st = await serviceUp();
+  // A "!" from a lend that failed while waiting has been seen now.
+  if (!st.queued) chrome.action.setBadgeText({ tabId: tab.id, text: '' }).catch(() => {});
+  if (st.queued) renderWaiting(st.queued);
+  else if (!st.service) {
+    // Threads from the last time it answered; a lend waits for the service.
+    render({ tab: { title: tab.title, url: tab.url }, threads: st.lastThreads, tb: st.lastTb || true, site: null });
+    say("BrowserBear's service on the Mac isn't up yet. A lend waits for it, with … on the toolbar.");
+  } else {
+    const r = await ask('lendable', { tabId: tab.id });
+    if (!r?.ok) say(r?.error || "BrowserBear's service on the Mac didn't answer. Setup shows what's missing.", true);
+    else {
+      say('');
+      render(r.result);
+    }
   }
 }

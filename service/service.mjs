@@ -254,16 +254,35 @@ const OPEN_WAIT_MS = Number(process.env.BROWSERBEAR_OPEN_WAIT_MS) || 20_000;
 const noBear = new Map(); // email or menu name -> when it was opened and nothing connected
 const NO_BEAR_MS = 10 * 60_000;
 
-function call(profile, op, args = {}, timeoutMs = 30_000) {
+// How long the extension gets to answer an op, by default. On a Mac that's flat
+// out, Chrome's background processes answer slowly though nothing's wrong, so
+// it can be raised (5 s to 5 min) without editing code. After opencode Browse #245.
+const between = (v, lo, hi, fallback) => (Number.isFinite(Number(v)) && Number(v) >= lo && Number(v) <= hi ? Number(v) : fallback);
+const CALL_MS = between(process.env.BROWSERBEAR_EXTENSION_TIMEOUT_MS, 5_000, 300_000, 30_000);
+
+function call(profile, op, args = {}, timeoutMs = CALL_MS) {
   const id = nextId++;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       profile.pending.delete(id);
-      reject(Object.assign(new Error(`${op} timed out after ${timeoutMs / 1000}s in ${describe(profile)}`), { timedOut: true }));
+      reject(Object.assign(new Error(`${op} timed out after ${timeoutMs / 1000}s in ${describe(profile)}${timeoutMs === CALL_MS ? ' (Chrome may be very busy: BROWSERBEAR_EXTENSION_TIMEOUT_MS gives it longer)' : ''}`), { timedOut: true }));
     }, timeoutMs);
     profile.pending.set(id, { resolve, reject, timer, tabId: args.tabId });
     profile.conn.write(line({ id, op, args }));
   });
+}
+
+// The user's tabs an agent has set a page size on with raw cdp: on a real
+// window that letterboxes the page inside it rather than resizing it, so it's
+// undone when the agent lets go. Twice, as opencode Browse found (#227) that
+// Chrome can drop a clear that races the set's resize. Detaching would end it
+// too, but the debugger can stay on (a recording), and this doesn't wait for that.
+const sized = new Set();
+async function unsize(p, tabId) {
+  for (let i = 0; i < 2; i++) {
+    await call(p, 'cdp', { tabId, method: 'Emulation.clearDeviceMetricsOverride', params: {} }, 2_000).catch(() => {});
+    if (!i) await sleep(100);
+  }
 }
 
 // A released tab in Mike's own Chrome is his again: off the thread's Browser
@@ -272,6 +291,7 @@ function call(profile, op, args = {}, timeoutMs = 30_000) {
 async function letGo(p, tabId) {
   if (p.instance === AGENT_INSTANCE) return;
   panel.forget(tabId, p.instance);
+  if (sized.delete(tabId)) await unsize(p, tabId);
   await call(p, 'detach', { tabId }, PROBE_MS).catch(() => {});
 }
 
@@ -418,7 +438,7 @@ const state = (tabId) => {
   // frames: target id of each frame from another site -> { session, parent (its
   // parent frame's target id, or null for the page), owner (the iframe's
   // backend id in the parent), url }. objects: object id -> the frame session it's from.
-  if (!tabState.has(tabId)) tabState.set(tabId, { refs: new RefMap(), last: null, dialog: null, frames: new Map(), objects: new Map() });
+  if (!tabState.has(tabId)) tabState.set(tabId, { refs: new RefMap(), labels: new Map(), last: null, dialog: null, frames: new Map(), objects: new Map() });
   return tabState.get(tabId);
 };
 
@@ -633,6 +653,34 @@ async function nodeFor(tabId, ref) {
   const backendNodeId = state(tabId).refs.node(ref);
   if (!backendNodeId) throw new Error(`unknown ref ${ref} in tab ${tabId}; take a snapshot first`);
   return backendNodeId;
+}
+
+// A snapshot line's role and name, without its value or flags.
+const roleAndName = (text) => text.replace(/ = ".*$/, '').replace(/ \[[^\]]*\]$/, '').trim();
+
+// A ref for an action: still in the page, or a stale-ref error straight away.
+// A re-render swaps the element out from under its ref (Wikipedia rebuilds its
+// search box on focus), and a script click on the detached copy does nothing
+// at all, so the agent heard "(no change)" and guessed. After opencode Browse's
+// fail-fast stale refs (anomalyco/browse#214): nothing is sent, the error says
+// what the ref was, and the page as it is now comes with it, with the ref
+// that has the same role and name if there's exactly one.
+async function liveNode(tabId, ref) {
+  const node = await nodeFor(tabId, ref);
+  // Only a node Chrome still has and says is detached counts: one it can't
+  // find any more (the page navigated, a frame went) gets the errors it always
+  // did, from whatever the command sends next.
+  const detached = await (async () => {
+    const { object } = await cdp(tabId, 'DOM.resolveNode', { backendNodeId: node });
+    const { result } = await cdp(tabId, 'Runtime.callFunctionOn', { objectId: object.objectId, functionDeclaration: 'function () { return this.isConnected; }', returnByValue: true });
+    return result?.value === false;
+  })().catch(() => false);
+  if (!detached) return node;
+  const was = state(tabId).labels.get(ref);
+  const now = await snapshot(tabId).catch(() => null);
+  const same = was ? [...state(tabId).labels].filter(([r, l]) => r !== ref && l === was && state(tabId).last?.some((x) => x.trimStart().startsWith(`${r} `))) : [];
+  const moved = same.length === 1 ? `; the same ${was} is ${same[0][0]} now` : '';
+  throw new Error(`ref ${ref}${was ? ` (${was})` : ''} is stale: the page removed or re-rendered it${moved}. Nothing was sent.${now ? `\n${now}` : ` snap ${tabId} for fresh refs`}`);
 }
 
 const dialogLine = (tabId, d) => `[js ${d.type} "${d.message}" is open; nothing else works until: browserbear dialog ${tabId} accept|dismiss]`;
@@ -870,6 +918,11 @@ async function snapshot(tabId, { full = false } = {}) {
   const lines = compact(nodes, s.refs, files, (await stillFilled(tabId)) || undefined, { frames: inside });
   const out = full ? { full: true, text: lines.join('\n') } : diff(s.last, lines);
   s.last = lines;
+  // What each ref was last seen as, for a stale ref's error (liveNode).
+  for (const l of lines) {
+    const m = /^\s*(e\d+) (.*)$/.exec(l);
+    if (m) s.labels.set(m[1], roleAndName(m[2]));
+  }
   const tab = (await call(await ownerOf(tabId), 'tabs')).find((t) => t.tabId === tabId);
   const head = `tab ${tabId}: ${tab?.title || ''} <${tab?.url || ''}>`;
   return `${head}\n${out.text}`;
@@ -1127,7 +1180,7 @@ const isRef = (target) => /^e\d+$/.test(target);
 // source of); either way a remote object to work on.
 async function targetObject(tabId, target) {
   if (isRef(target)) {
-    const { object } = await cdp(tabId, 'DOM.resolveNode', { backendNodeId: await nodeFor(tabId, target) });
+    const { object } = await cdp(tabId, 'DOM.resolveNode', { backendNodeId: await liveNode(tabId, target) });
     return object.objectId;
   }
   const r = await cdp(tabId, 'Runtime.evaluate', { expression: `document.querySelector(${JSON.stringify(target)})` });
@@ -1901,7 +1954,7 @@ const commands = {
 
   click: ({ tab, ref, script }) =>
     orClosed(tab, async (sending) => {
-      const node = await nodeFor(tab, ref);
+      const node = await liveNode(tab, ref);
       const before = state(tab).last;
       const startUrl = (await tabNow(tab))?.url;
       await markPage(tab);
@@ -1936,7 +1989,7 @@ const commands = {
   type: ({ tab, ref, text, submit, replace }) =>
     orClosed(tab, async (sending) => {
       if (ref) {
-        const node = await nodeFor(tab, ref);
+        const node = await liveNode(tab, ref);
         await cdp(tab, 'DOM.focus', { backendNodeId: node }).catch(() => clickNode(tab, node));
       }
       const node = ref ? await nodeFor(tab, ref) : null;
@@ -2096,7 +2149,13 @@ const commands = {
   eval: ({ tab, js }) => evaluate(tab, js),
 
   // Raw CDP, for debugging BrowserBear itself and for anything it doesn't wrap yet.
-  cdp: ({ tab, method, params }) => cdp(tab, method, params ? JSON.parse(params) : {}),
+  async cdp({ tab, method, params }) {
+    const r = await cdp(tab, method, params ? JSON.parse(params) : {});
+    if (method === 'Emulation.clearDeviceMetricsOverride') sized.delete(tab);
+    if (method !== 'Emulation.setDeviceMetricsOverride' || bearTabs.has(tab) || tabOwner.get(tab) === AGENT_INSTANCE) return r;
+    sized.add(tab);
+    return { ...r, note: `tab ${tab} is the user's own, so its window now shows the page at that size, letterboxed, until you undo it: browserbear cdp ${tab} Emulation.clearDeviceMetricsOverride (release does it too)` };
+  },
 
   async upload({ tab, ref, files }) {
     if (!files?.length) throw new Error('say which files to upload');
@@ -2142,6 +2201,7 @@ const commands = {
     panel.remember(tabId, thread, p.instance);
     panel.handedOff(tabId, p.instance);
     setHanded(tabId, true);
+    if (sized.delete(tabId)) await unsize(p, tabId);
     const t = await call(p, 'handoff', { tabId }).catch((e) => {
       if (/unknown op/.test(e.message)) throw new Error(`${describe(p)} has an older BrowserBear extension; browserbear reload, then try again`);
       // You closed the tab an agent had sent there: forget it, look again.
@@ -2231,6 +2291,7 @@ const commands = {
   async close({ tab }) {
     const p = await ownerOf(tab);
     await call(p, 'close', { tabId: tab });
+    sized.delete(tab);
     tabState.delete(tab);
     marks.closed(tab);
     tabOwner.delete(tab);

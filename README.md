@@ -37,6 +37,10 @@ browserbear CLI (or Threadbear)
 - Snapshots list headings and things you can click or type in, with refs (`e12`) that
   stay on the same element. After the first look you get only what changed, so most
   steps cost a few hundred tokens rather than 15k.
+- A ref whose element the page has since removed or re-rendered fails at once,
+  before anything is sent: `ref e3 (button "Cart") is stale`, with the page as it
+  is now and the new ref when exactly one element has the same role and name.
+  After opencode Browse's fail-fast stale refs.
 - What's in iframes is in the snapshot too, indented under `[frame host]` where the
   iframe is, and its refs work like any other. A frame from another site (a card
   form, a sign-in, a captcha) is a debugger session of its own: the extension (and
@@ -242,6 +246,14 @@ saying which tab it is. The tab stays yours: the thread is told not
 to close it and to `release` it when it's done. Setup is a link at the bottom
 of the popup.
 
+If BrowserBear's service on the Mac isn't up yet (Chrome just started, or it's
+restarting after an update), the popup still offers the threads it last saw and
+a lend waits for the service, with `…` on the toolbar badge for that tab. It
+goes as soon as the service says hello; opening the popup on that tab again
+cancels it, and a lend that then fails shows `!` with the reason in the button's
+tooltip. A handoff puts a tab in your window: never a minimised one, and when
+the one you last used is gone, the window with the tab you used most recently.
+
 ## Sites agents may use
 
 `allow.json` in BrowserBear's folder lists the sites agents may use: one list
@@ -286,12 +298,26 @@ Browse's capture redaction): auth, cookie and secret-named headers; query and
 fragment parameters named like secrets (and `key`, `code`); path segments that
 look like tokens (JWTs, long hex or mixed-case base64); string values of JSON and
 form fields named like secrets; anything typed into a password, card or
-one-time-code field while recording; and any of those values (16+ characters)
-wherever else it turns up. Bodies (response, and request ones)
+one-time-code field while recording; and any of those values wherever else it
+turns up: inside other text when it's 16+ characters, and only as a whole value
+(a JSON string, a parameter) when it's shorter, so a `session=4242` doesn't
+blank the 4242 in "order 14242". Bodies (response, and request ones)
 are only kept with `--bodies`, and request bodies never when `fill` signed in
 during the recording. A handoff detaches the debugger, so recording pauses
 until the agent's next command in that tab; cancelling Chrome's bar, or a
 service restart, ends it.
+
+## Settings for a busy Mac
+
+- `BROWSERBEAR_EXTENSION_TIMEOUT_MS` (5000 to 300000, default 30000): how long the
+  extension gets to answer, for a Mac so busy that Chrome answers slowly.
+- `BROWSERBEAR_AGENT_PORT`: pins the agents' browser's debugging port. Unpinned,
+  it's 9339, or when another program holds that, the first free port up to 9346
+  (remembered in `agent/port`).
+- A page size set with raw `cdp ... Emulation.setDeviceMetricsOverride` on one of
+  your own tabs letterboxes the page in your window, so the agent is told, and
+  `release`, `handoff` or the pill's ✕ clears it (twice, since Chrome can drop a
+  clear that races the resize).
 
 ## Tests
 
