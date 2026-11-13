@@ -16,6 +16,7 @@ import { createMarks } from './marks.mjs';
 import { domainOf, looksLikeEmail, menuProfiles, openByEmail, openByMenu } from './chrome.mjs';
 import { RefMap, compact, diff, sameApartFromFocus } from './snapshot.mjs';
 import { createPanel } from './panel.mjs';
+import { createAnnotations } from './annotate.mjs';
 import { allowedFor, loginsFor, pickLogin, secretsFor } from './onepassword.mjs';
 import { tbPath, showBrowserPanel, run as runFile } from './threadbear.mjs';
 import { createAllow, matches, siteOf } from './allow.mjs';
@@ -398,7 +399,8 @@ const marks = createMarks({
   log,
 });
 
-const panel = createPanel({ home: HOME, profiles: () => [...profiles.values()], call, mark: tabId => marks.get(tabId) });
+const annotations = createAnnotations({ home: HOME, call, log: (...a) => log(...a), open: async (url) => (await runFile(process.env.BROWSERBEAR_OPEN || '/usr/bin/open', [url], 10_000)) !== null });
+const panel = createPanel({ home: HOME, profiles: () => [...profiles.values()], call, mark: tabId => marks.get(tabId), annotate: (...a) => annotations.start(...a) });
 
 // What the pill in an agent's tab says it's doing, per command.
 const USES = {
@@ -1824,6 +1826,15 @@ const asks = {
     return { thread: id };
   },
 
+  // The popup's Annotate: the tools go on this tab, for that thread.
+  async annotate(profile, { tabId, thread, title }) {
+    await tabIn(profile, tabId);
+    return annotations.start(profile, tabId, thread, title);
+  },
+
+  // Attach in the overlay (extension/annotation.js), with its screenshot.
+  annotated: (profile, args) => annotations.attached(profile, args),
+
   // The popup's "Let every agent use <site>" switch.
   async allowSite(profile, { tabId, on }) {
     const t = await tabIn(profile, tabId);
@@ -2465,6 +2476,7 @@ function onHostMessage(profile, msg) {
       letGo(profile, msg.tabId);
     }
     if (msg.event === 'mark' && msg.action === 'done') marks.clickedDone(msg.tabId);
+    if (msg.event === 'annotation' && msg.action === 'cancel') annotations.cancelled(msg, profile.instance);
     return;
   }
   const waiter = profile.pending.get(msg.id);
@@ -2580,7 +2592,7 @@ async function onClientMessage(conn, msg) {
   let using = null; // the tab this command works in, for its marks
   busy++;
   try {
-    if (['panelStill', 'panelShow', 'panelAttach', 'panelCdp', 'panelWindow', 'panelResume', 'panelShowChrome'].includes(msg.cmd)) {
+    if (['panelStill', 'panelShow', 'panelAttach', 'panelCdp', 'panelWindow', 'panelResume', 'panelShowChrome', 'panelAnnotate'].includes(msg.cmd)) {
       conn.write(line({ id: msg.id, ok: true, result: await panel.dispatch(conn, msg) }));
       return;
     }

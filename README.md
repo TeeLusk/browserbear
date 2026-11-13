@@ -254,6 +254,27 @@ cancels it, and a lend that then fails shows `!` with the reason in the button's
 tooltip. A handoff puts a tab in your window: never a minimised one, and when
 the one you last used is gone, the window with the tab you used most recently.
 
+## Annotating a page for a thread
+
+The popup's Annotate this page (pick the thread, then Annotate), or Annotate
+on the page's row in Threadbear's Browser panel, puts a small toolbar over the
+page: Select elements (Shift-click for more), mark a Region, Draw, Erase, and a
+box for what you want changed. Attach (or Return) takes a screenshot with your
+marks, and Threadbear comes forward with that thread's message box holding
+your comment, what you marked (each element's selector and a little of its
+HTML) and the screenshot. Nothing is sent until you press Send there. Esc or
+Cancel stops without anything going anywhere.
+
+The tools (`extension/annotation.js`, adapted from T3 Code under MIT, see
+`extension/annotation.LICENSE`) run in the extension's isolated world, so the
+page can't see or call them, and go in through scripting rather than the
+debugger, so Chrome's "started debugging" bar stays away. Attach hands its
+result to the service (`service/annotate.mjs`), which writes it to
+`annotations/` here (0600) and opens
+`threadbear://thread/<id>?annotation=<id>`; Threadbear reads and deletes it.
+Ones never picked up go after a day. Chrome's own pages and the Web Store
+can't be annotated.
+
 ## Sites agents may use
 
 `allow.json` in BrowserBear's folder lists the sites agents may use: one list

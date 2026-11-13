@@ -46,6 +46,10 @@ function render(v) {
     $('lent').textContent = `A thread has this tab: ${t ? t.title : v.tab.lentTo}. Lending it again hands it to another thread.`;
     $('lent').hidden = false;
   }
+  // Annotate: the thread the tab is lent to first, then the rest.
+  $('annotate').hidden = !v.tb || !v.threads.length;
+  const order = [...v.threads].sort((a, b) => (b.id === v.tab.lentTo) - (a.id === v.tab.lentTo));
+  $('annotate-thread').replaceChildren(...order.map((t) => Object.assign(document.createElement('option'), { value: t.id, textContent: t.title })));
   $('no-tb').hidden = v.tb;
   $('new').hidden = !v.tb;
   $('text').hidden = !v.tb;
@@ -81,6 +85,20 @@ function render(v) {
 }
 
 $('new').addEventListener('click', () => lend('new'));
+$('annotate-go').addEventListener('click', async () => {
+  if (busy) return;
+  busy = true;
+  for (const b of document.querySelectorAll('button')) b.disabled = true;
+  const select = $('annotate-thread');
+  say('Opening the annotation tools…');
+  const r = await ask('annotate', { tabId: tab.id, thread: select.value, title: select.selectedOptions[0]?.textContent });
+  busy = false;
+  if (!r?.ok) {
+    for (const b of document.querySelectorAll('button')) b.disabled = false;
+    return say(r?.error || "BrowserBear didn't answer", true);
+  }
+  window.close();
+});
 $('site-on').addEventListener('change', async (e) => {
   const r = await ask('allowSite', { tabId: tab.id, on: e.target.checked });
   if (!r?.ok) {

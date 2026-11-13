@@ -15,7 +15,7 @@ const AGENT = 'agent-chrome';
 // bar up, so those are taken far less often, and never once he has the tab.
 const FRESH_MS = { agent: 3_000, chrome: 20_000 };
 
-export function createPanel({ home, profiles, call, mark }) {
+export function createPanel({ home, profiles, call, mark, annotate }) {
   const file = path.join(home, 'panel-tabs.json');
   let saved = [];
   try { saved = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
@@ -104,6 +104,14 @@ export function createPanel({ home, profiles, call, mark }) {
     return {};
   }
 
+  // Annotate: the tools go on the page in Mike's own Chrome, for this thread
+  // (annotate.mjs). Not the agents' browser: nobody's looking at its window.
+  async function startAnnotating(thread, { tab, profile: instance, title }) {
+    const { own, profile } = ownTab(thread, tab, instance);
+    if (own.instance === AGENT) throw new Error('Annotate works on pages in your own Chrome, not the agents\' browser.');
+    return annotate(profile, own.tabId, thread, title);
+  }
+
   return { remember, state,
     handedOff(tabId, instance) {
       const t = tabs.get(key(instance, tabId));
@@ -114,6 +122,7 @@ export function createPanel({ home, profiles, call, mark }) {
       const args = msg.args || {};
       if (msg.cmd === 'panelStill') return still(msg.thread, args);
       if (msg.cmd === 'panelShow') return show(msg.thread, args);
+      if (msg.cmd === 'panelAnnotate') return startAnnotating(msg.thread, args);
       throw new Error('This Browser panel is from an older Threadbear: update it to see this thread\'s pages.');
     },
     disconnected(instance) {

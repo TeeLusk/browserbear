@@ -78,5 +78,8 @@ li button:hover:not(:disabled) { background: var(--hover); }
 .note { background: var(--hover); border-radius: 6px; padding: 6px; }
 label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
 #status.error { color: var(--red); }
+.row { display: flex; gap: 6px; margin-bottom: 10px; }
+.row select { flex: 1; min-width: 0; font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 5px; }
+.row button.primary { width: auto; padding: 6px 12px; }
 footer { margin-top: 8px; text-align: right; }
 a { color: var(--accent); text-decoration: none; }

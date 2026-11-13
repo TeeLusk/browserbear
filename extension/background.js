@@ -408,6 +408,22 @@ const ops = {
     return true;
   },
 
+  // Annotate for a Threadbear thread (annotation.js): the overlay goes into
+  // this extension's isolated world in the tab, never the page's own, and the
+  // tab comes to the front so the user can mark it. Through scripting, not the
+  // debugger, so Chrome's "started debugging" bar stays away. What they attach
+  // comes back through onMessage below, from that tab's top frame only.
+  async annotate({ tabId, sessionId, threadTitle }) {
+    await detach(tabId);
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['annotation.js'] });
+    const [{ result } = {}] = await chrome.scripting.executeScript({ target: { tabId }, func: (id, title) => globalThis.__browserbearAnnotate(id, title), args: [sessionId, threadTitle || null] });
+    if (result?.status !== 'active') throw new Error("the annotation tools didn't start on this page");
+    annotating.set(tabId, sessionId);
+    const tab = await chrome.tabs.update(tabId, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true });
+    return { tabId, url: tab.url };
+  },
+
   // Saves into Chrome's download folder (optionally a subfolder of it) and
   // waits for the file, so the agent gets a real path back.
   async download({ url, filename }) {
@@ -935,6 +951,41 @@ async function restoreLends() {
 queue(restoreLends);
 chrome.tabs.onRemoved.addListener((tabId) => {
   queuedLends().then((list) => list.some((q) => q.tabId === tabId) && chrome.storage.session.set({ [LENDS]: list.filter((q) => q.tabId !== tabId) }));
+});
+
+// ---- Annotations (ops.annotate, annotation.js) ----
+const annotating = new Map(); // tabId -> the session the service started there
+
+// Attach in the overlay: a screenshot of what's on screen (the controls are
+// already hidden; the marks stay), then the service, which hands it to the
+// thread. Only from the session the service started in that tab's top frame.
+async function annotated(tab, frameId, msg) {
+  if (frameId !== 0 || annotating.get(tab.id) !== msg.sessionId) throw new Error('This annotation has ended. Start Annotate again.');
+  const now = await chrome.tabs.get(tab.id);
+  if (!now.active) throw new Error('Bring this tab to the front, then Attach again.');
+  const png = await chrome.tabs.captureVisibleTab(now.windowId, { format: 'png' }).catch(() => null);
+  const r = await ask('annotated', { tabId: tab.id, sessionId: msg.sessionId, annotation: msg.annotation, png });
+  if (r?.ok) annotating.delete(tab.id);
+  return r;
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (annotating.delete(tabId)) post({ type: 'event', event: 'annotation', action: 'cancel', tabId });
+});
+
+// From the overlay in a tab: Attach, or Cancel.
+chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  if (sender.id !== chrome.runtime.id || !sender.tab || !String(msg?.type).startsWith('annotation')) return;
+  if (msg.type === 'annotation-cancel') {
+    if (sender.frameId === 0 && annotating.get(sender.tab.id) === msg.sessionId) {
+      annotating.delete(sender.tab.id);
+      post({ type: 'event', event: 'annotation', action: 'cancel', tabId: sender.tab.id, sessionId: msg.sessionId });
+    }
+    return;
+  }
+  if (msg.type !== 'annotation') return;
+  annotated(sender.tab, sender.frameId, msg).then(reply, (e) => reply({ ok: false, error: String(e?.message || e) }));
+  return true; // answering later
 });
 
 // The setup page polls this every second or so.
