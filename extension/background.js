@@ -964,7 +964,9 @@ async function annotated(tab, frameId, msg) {
   const now = await chrome.tabs.get(tab.id);
   if (!now.active) throw new Error('Bring this tab to the front, then Attach again.');
   const png = await chrome.tabs.captureVisibleTab(now.windowId, { format: 'png' }).catch(() => null);
-  const r = await ask('annotated', { tabId: tab.id, sessionId: msg.sessionId, annotation: msg.annotation, png });
+  // The page's own title, without the mark's "🐻 name · ".
+  const annotation = { ...msg.annotation, title: String(msg.annotation?.title ?? '').replace(MARK_PREFIX, '') };
+  const r = await ask('annotated', { tabId: tab.id, sessionId: msg.sessionId, annotation, png });
   if (r?.ok) annotating.delete(tab.id);
   return r;
 }
