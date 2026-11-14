@@ -9,13 +9,15 @@ export function tbPath() {
   return fs.existsSync(current) ? current : null;
 }
 
+// tb list --all --json passed Node's 1 MB default (780 KB at 158 threads,
+// 14 Nov), so the buffer is big.
 // Chrome starts the service without node on PATH. Use the service's Node for
 // tb's launcher, and direct execution for a shell script or /usr/bin/open.
 export async function run(file, args, timeout = 15_000) {
   try {
     const node = fs.readFileSync(file, 'utf8').startsWith('#!/usr/bin/env node');
     const [cmd, argv] = node ? [process.execPath, [file, ...args]] : [file, args];
-    return await new Promise(resolve => execFile(cmd, argv, { timeout }, (e, out) => resolve(e ? null : out)));
+    return await new Promise(resolve => execFile(cmd, argv, { timeout, maxBuffer: 64 * 1024 * 1024 }, (e, out) => resolve(e ? null : out)));
   } catch { return null; }
 }
 

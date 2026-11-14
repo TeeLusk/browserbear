@@ -246,6 +246,12 @@ saying which tab it is. The tab stays yours: the thread is told not
 to close it and to `release` it when it's done. Setup is a link at the bottom
 of the popup.
 
+A tab is lent to one thread at a time. Lending it to another moves it, and the
+first thread is told the tab went elsewhere when it next tries to use it. While
+it's lent, a tab Chrome has stopped drawing (its window covered, or the screen
+asleep) is treated as visible when a thread looks at it or `show`s it, as an
+agent's own tabs are.
+
 If BrowserBear's service on the Mac isn't up yet (Chrome just started, or it's
 restarting after an update), the popup still offers the threads it last saw and
 a lend waits for the service, with `…` on the toolbar badge for that tab. It

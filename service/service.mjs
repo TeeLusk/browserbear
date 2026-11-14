@@ -719,13 +719,16 @@ async function fileInputs(tabId) {
 // analytics showed the Reach tab over an empty body (31 Oct). Focus emulation
 // has Chrome treat the page as visible and focused while the debugger is
 // attached, and the extension detaches after 30 s idle, so it's checked before
-// every look. Only agents' tabs: one of your own pages thinking it has focus
-// could, say, mark your messages read.
+// every look. Only agents' tabs and tabs you've lent: one of your own pages
+// thinking it has focus could, say, mark your messages read, but lending one
+// is saying a thread may work in it, and Amazon Ads' editor sat on spinners in
+// a lent tab while it was hidden (14 Nov). Focus emulation ends when the
+// debugger detaches (release, or 30 s idle).
 async function wake(tabId) {
   if (state(tabId).dialog) return;
   const visibility = await evaluate(tabId, 'document.visibilityState').catch(() => null);
   if (visibility !== 'hidden') return;
-  if (!bearTabs.has(tabId)) {
+  if (!bearTabs.has(tabId) && !grants.has(tabId)) {
     const tab = (await call(await ownerOf(tabId), 'tabs')).find((t) => t.tabId === tabId);
     if (!tab?.agent) return;
   }
@@ -1688,6 +1691,7 @@ function grant(tabId, thread, url) {
   saveGrants();
 }
 function endGrant(tabId) {
+  relent.delete(tabId);
   if (grants.delete(tabId)) saveGrants();
 }
 // Whether a grant lets this thread use this URL in this tab.
@@ -1699,23 +1703,44 @@ const granted = (url, thread, tabId) => {
 const blocked = (url, thread, tabId) => (granted(url, thread, tabId) ? null : allow.check(url, thread));
 
 // Grants for tabs that have closed, or threads that have been archived or
-// deleted, go. Checked every minute while there are any.
-setInterval(async () => {
-  if (!grants.size) return;
+// deleted, go. Checked every minute while there are any. A tb that fails, or
+// a list that doesn't parse or is empty, says nothing about which threads are
+// gone: that used to end every grant while its thread was still working (14
+// Nov). So a thread has to be missing from two good lists in a row.
+const GRANT_SWEEP_MS = Number(process.env.BROWSERBEAR_GRANT_SWEEP_MS) || 60_000;
+const missing = new Set(); // threads absent from the last good list
+async function liveThreads() {
   const tb = tbPath();
-  let live = null;
-  if (tb) {
-    try { live = new Set(JSON.parse((await runFile(tb, ['list', '--all', '--json'])) || '[]').filter((t) => !t.archivedAt && !t.archived).map((t) => t.id)); } catch {}
+  if (!tb) return null;
+  try {
+    const list = JSON.parse((await runFile(tb, ['list', '--all', '--json'])) || 'null');
+    if (!Array.isArray(list) || !list.length) return null;
+    return new Set(list.filter((t) => t?.id && !t.archivedAt && !t.archived).map((t) => t.id));
+  } catch {
+    return null;
   }
+}
+async function sweepGrants() {
+  if (!grants.size) return;
+  const live = await liveThreads();
   for (const [tabId, g] of [...grants]) {
-    if (live && !live.has(g.thread)) { log('grant ends, thread gone', tabId, g.thread); endGrant(tabId); continue; }
-    if ((await tabNow(tabId)) === null) endGrant(tabId);
+    if (live && !live.has(g.thread)) {
+      if (missing.has(g.thread)) { log('grant ends, thread gone', tabId, g.thread); endGrant(tabId); continue; }
+    } else if ((await tabNow(tabId)) === null) { endGrant(tabId); continue; }
   }
-}, 60_000).unref();
+  missing.clear();
+  if (live) for (const g of grants.values()) if (!live.has(g.thread)) missing.add(g.thread);
+}
+setInterval(() => sweepGrants().catch((e) => log('grant sweep failed:', e.message)), GRANT_SWEEP_MS).unref();
 
 function offList(url, thread, what, tabId) {
   const list = blocked(url, thread, tabId);
   if (!list) return null;
+  // Lent here once, then lent to another thread: say that, not "off the list".
+  const g = tabId != null && grants.get(tabId);
+  if (g && thread && g.thread !== thread && relent.get(tabId)?.has(thread)) {
+    return new Error(`tab ${tabId} isn't lent to this thread any more: the user lent it to another thread (${g.thread}), which has it now. Ask the user to lend it back here if you still need it (@ in Threadbear's message box), and don't use it till then.`);
+  }
   return new Error(`${what} ${siteOf(url) || url}, which isn't on the sites agents may use${thread ? ' in this thread' : ''} (${list.join(', ')}). ${HOW_TO_ALLOW}`);
 }
 
@@ -1758,12 +1783,26 @@ async function tabIn(profile, tabId) {
 // Lends one of the user's tabs to a thread: claimed for it, granted to it (that
 // tab, on its site, for as long as it's lent; nothing goes on the list), and
 // marked.
+// Threads a tab was lent to before it was lent elsewhere, so they hear why
+// it stopped working. Kept in memory only: a restart forgets the reason, not
+// the grant.
+const relent = new Map(); // tabId -> Set of threads
+// Returns the thread the tab was taken from, if it was lent to another one.
 function lendTab(profile, t, thread) {
+  const before = grants.get(t.tabId)?.thread || marks.threadOf(t.tabId) || null;
+  const previous = before && before !== thread ? before : null;
+  if (previous) {
+    if (!relent.has(t.tabId)) relent.set(t.tabId, new Set());
+    relent.get(t.tabId).add(previous);
+    log('tab', t.tabId, 'taken from', previous);
+  }
+  relent.get(t.tabId)?.delete(thread);
   claimed.add(t.tabId);
   grant(t.tabId, thread, t.url);
   panel.remember(t.tabId, thread, profile.instance);
   marks.used(t.tabId, thread, 'lent by you');
   log('lent tab', t.tabId, 'to', thread);
+  return previous;
 }
 
 const lentWords = (profile, t) =>
@@ -2197,6 +2236,9 @@ const commands = {
 
   async show({ tab }) {
     await call(await ownerOf(tab), 'show', { tabId: tab });
+    // At the front of its window isn't drawn if the window is covered or the
+    // screen is asleep; a lent or agent's tab is treated as visible too.
+    await wake(tab).catch(() => {});
     if (!bearTabs.has(tab)) return `tab ${tab} is at the front of its window`;
     return `tab ${tab} is at the front of BrowserBear's window, which the user may not be looking at. To have them do something in it: browserbear handoff ${tab} --wait`;
   },
@@ -2342,8 +2384,9 @@ const commands = {
     if (!to) throw new Error('say which thread to lend the tab to');
     const p = await ownerOf(tab);
     const t = await tabIn(p, tab);
-    lendTab(p, t, to);
-    return { tabId: t.tabId, title: t.title, url: t.url, words: lentWords(p, t) };
+    const previous = lendTab(p, t, to);
+    // previous: the thread that had the tab, which loses it now.
+    return { tabId: t.tabId, title: t.title, url: t.url, words: lentWords(p, t), previous };
   },
 
   // The sites agents may use. Anyone can look; only the user changes it, so
