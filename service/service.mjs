@@ -528,6 +528,12 @@ async function send(p, tabId, method, params, timeoutMs) {
   if (method.startsWith('Input.')) return call(p, 'cdp', { tabId, method, params }, timeoutMs);
   // Browser-side recovery must still work when the page's JavaScript is stuck.
   const recovery = /^(Page\.(getNavigationHistory|navigate|handleJavaScriptDialog)$|Emulation\.(clearDeviceMetricsOverride|setFocusEmulationEnabled)$|Target\.getTargetInfo$)/.test(method);
+  // A JS dialog blocks the page's main thread: anything that goes to the page
+  // waits behind it and timed out as "the page's own scripts are stuck",
+  // though only snap said why (Amazon Ads' leave-site dialog after goto, 14
+  // Nov). So say it now, as snap does.
+  const { dialog } = state(tabId);
+  if (dialog && !recovery) throw new Error(dialogLine(tabId, dialog));
   if (state(tabId).stuck && !recovery) await stillStuck(p, tabId);
   try {
     return await call(p, 'cdp', { tabId, method, params }, timeoutMs);
@@ -555,6 +561,8 @@ async function unstick(p, tabId, method, params, e) {
   if (nav) {
     // An eval awaiting a slow promise doesn't hold the page up.
     if (await pageAnswers(p, tabId)) throw new Error(`${e.message}; the page still answers, so it's that command that's slow`);
+    // A dialog that opened while it waited is why, not the page's scripts.
+    if (state(tabId).dialog) throw new Error(dialogLine(tabId, state(tabId).dialog));
     const url = nav.entries[nav.currentIndex]?.url || '';
     state(tabId).stuck = { url };
     log('page stuck', tabId, method);
@@ -2144,10 +2152,19 @@ const commands = {
     const refused = offList(url, thread, "BrowserBear won't go to", tab);
     if (refused) throw refused;
     const p = await ownerOf(tab);
+    let left = false;
     try {
       // Page events (the leave-site dialog among them) only arrive once enabled.
       await cdp(tab, 'Page.enable');
-      await cdp(tab, 'Page.navigate', { url });
+      await cdp(tab, 'Page.navigate', { url }).catch(async (e) => {
+        // goto is the agent saying "leave this page", so the page's own "Leave
+        // site? Changes you made may not be saved" is answered yes, and the
+        // agent hears that it was there. Any other dialog stays for the agent.
+        if (state(tab).dialog?.type !== 'beforeunload') throw e;
+        await cdp(tab, 'Page.handleJavaScriptDialog', { accept: true });
+        state(tab).dialog = null;
+        left = true;
+      });
     } catch (e) {
       if (!e.refused) throw e;
       await call(p, 'navigate', { tabId: tab, url }, 40_000).catch((e) => {
@@ -2162,7 +2179,8 @@ const commands = {
     await drawn(tab);
     const failure = loadFailure((await call(p, 'tabs')).find((t) => t.tabId === tab));
     if (failure) throw new Error(`${failure}. ${wayOut(tab)}`);
-    return (await snapshot(tab)) + (await handoffHint(tab));
+    const warned = left ? `(the page warned that changes may not be saved; goto left it anyway)\n` : '';
+    return warned + (await snapshot(tab)) + (await handoffHint(tab));
   },
 
   // The page's text, for reading rather than acting. Long pages go to a file.

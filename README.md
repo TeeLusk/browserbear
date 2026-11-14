@@ -227,6 +227,12 @@ tab's id, rather than looking like success. Chrome keeps debuggers out of its wa
 pages (certificate errors, Safe Browsing), so `read`, `snap` and `eval` name the problem
 there, and `goto` still gets the tab out, through `chrome.tabs` instead of the debugger.
 
+A JS dialog (alert, confirm, a page's "Leave site?") blocks the page, so while one
+is open every command that needs the page says so straight away and points at
+`browserbear dialog <tab> accept|dismiss`. `goto` answers the leave-site dialog it
+sets off itself (that's what going somewhere else means) and says the page warned
+that changes may not be saved.
+
 A real click on a link that changes nothing but focus gets clicked again by
 script, since following a link twice is harmless. For anything else that ignores
 a real click, the agent is told about `--script`.
