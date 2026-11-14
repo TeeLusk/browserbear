@@ -9,11 +9,12 @@ import { startBear } from './harness.mjs';
 
 const TOOLS = [
   {
-    toolId: 't1', name: 'searchOrders', description: 'Find orders by customer name or email', frameId: 'F1',
+    // No toolId, as Chrome 157 sends them.
+    name: 'searchOrders', description: 'Find orders by customer name or email', frameId: 'F1',
     inputSchema: { type: 'object', properties: { query: { type: 'string', description: 'name or email' }, status: { type: 'string', enum: ['paid', 'shipped'] } }, required: ['query'] },
     annotations: { readOnly: true, untrustedContent: true },
   },
-  { toolId: 't2', name: 'markShipped', description: 'Mark an order shipped', frameId: 'F1', inputSchema: { type: 'object', properties: { orderId: { type: 'string' } }, required: ['orderId'] }, annotations: { readOnly: false, consequential: true } },
+  { name: 'markShipped', description: 'Mark an order shipped', frameId: 'F1', inputSchema: { type: 'object', properties: { orderId: { type: 'string' } }, required: ['orderId'] }, annotations: { readOnly: false, consequential: true } },
 ];
 
 test('a page with WebMCP tools: snap mentions them, tools lists them, call uses them', async (t) => {
