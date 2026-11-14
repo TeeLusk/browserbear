@@ -32,6 +32,10 @@ const USAGE = `browserbear: let agents use your real Chrome profiles
                                                 ("Choose files"); snap lists hidden inputs as file-input
   browserbear download <tab> <url> [filename]
   browserbear dialog <tab> accept|dismiss [text]
+  browserbear tools <tab>                       the tools the page offers agents (WebMCP): name, what it
+                                                does, its input, read-only or not. snap says when there are some
+  browserbear call <tab> <tool> ['<json>']      use one, as the signed-in user. Read-only tools work in any
+                                                tab; ones that change things need it lent, claimed or yours
   browserbear show <tab>                        bring a tab forward in its window (real clicks need it)
   browserbear handoff <tab|url>                 before asking the user to do something in a tab (sign in,
                                                 pay, approve): brings the tab's window to the front, in their own
@@ -137,6 +141,10 @@ function argsFor(cmd, pos, flags) {
       return { tab: a, js: [b, ...rest].join(' ') };
     case 'cdp':
       return { tab: a, method: b, params: rest[0] };
+    case 'tools':
+      return { tab: a };
+    case 'call':
+      return { tab: a, name: b, input: rest.join(' ') || undefined };
     case 'upload':
       return { tab: a, ref: b, files: rest };
     case 'download':

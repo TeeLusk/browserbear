@@ -854,6 +854,8 @@ chrome.debugger.onEvent.addListener(({ tabId, sessionId }, method, params) => {
   // Only what the service needs to know about; everything else stays here.
   if (method === 'Page.javascriptDialogOpening') post({ type: 'event', event: 'dialog', tabId, params });
   if (method === 'Page.javascriptDialogClosed') post({ type: 'event', event: 'dialogClosed', tabId });
+  // The tools a page offers agents (WebMCP), and the answers to calling them.
+  if (method.startsWith('WebMCP.')) post({ type: 'event', event: 'webmcp', tabId, method, params });
   if (recording.has(tabId) && NET_EVENTS.has(method)) post({ type: 'event', event: 'net', tabId, method, params });
   // The Browser panel's picture. Chrome sends the next one once the service
   // acks this one, so a slow panel gets fewer frames, not a queue.

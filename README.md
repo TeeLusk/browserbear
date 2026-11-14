@@ -233,6 +233,20 @@ is open every command that needs the page says so straight away and points at
 sets off itself (that's what going somewhere else means) and says the page warned
 that changes may not be saved.
 
+## Pages' own tools (WebMCP)
+
+A page can offer agents tools of its own with WebMCP
+(`document.modelContext.registerTool`: a name, a description, an input schema, and
+whether it's read-only). `snap` says when a page has some, `browserbear tools <tab>`
+describes them, and `browserbear call <tab> <tool> '<json>'` uses one, as whoever
+is signed in there: one call instead of clicking through the pages. Read-only tools
+work in any tab a look does; ones that change things need the tab lent, claimed or
+the agent's own, as a click does. The allowed sites apply as for any command.
+
+Chrome 157 has WebMCP off unless it's started with `--enable-features=WebMCP` (or
+`chrome://flags/#enable-webmcp-testing`); the agents' browser starts with it on.
+Without it, pages see no `document.modelContext`, and `tools` says there are none.
+
 A real click on a link that changes nothing but focus gets clicked again by
 script, since following a link twice is harmless. For anything else that ignores
 a real click, the agent is told about `--script`.

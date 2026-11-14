@@ -74,6 +74,9 @@ const chromeFlags = () => [
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
   '--disable-background-timer-throttling',
+  // WebMCP: pages can offer agents tools (document.modelContext), which
+  // browserbear tools and call use. Off by default in Chrome 157.
+  '--enable-features=WebMCP',
 ];
 
 fs.mkdirSync(PROFILE, { recursive: true, mode: 0o700 });
@@ -428,6 +431,7 @@ function onEvent(m) {
   }
   if (method === 'Page.javascriptDialogOpening') post({ type: 'event', event: 'dialog', tabId: tab.tabId, params });
   if (method === 'Page.javascriptDialogClosed') post({ type: 'event', event: 'dialogClosed', tabId: tab.tabId });
+  if (method.startsWith('WebMCP.')) post({ type: 'event', event: 'webmcp', tabId: tab.tabId, method, params });
   if (tab.recording && NET_EVENTS.has(method)) post({ type: 'event', event: 'net', tabId: tab.tabId, method, params });
 }
 
