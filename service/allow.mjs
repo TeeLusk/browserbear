@@ -85,6 +85,10 @@ export function createAllow(file) {
     listFor,
     // null when the URL may be used; otherwise the list it isn't on.
     check(url, thread) {
+      // A tab with no page yet (a popup from a target=_blank link, before its
+      // first page commits) isn't anywhere: what it lands on is checked after
+      // the next action. After opencode Browse's #273.
+      if (!url) return null;
       const list = listFor(thread);
       if (!list.length || list.some((p) => matches(p, url))) return null;
       return list;

@@ -23,6 +23,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { HOME, SOCKET, line, lineReader } from '../service/wire.mjs';
 import { NET_EVENTS } from '../service/har.mjs';
+import { CONSOLE_EVENTS } from '../service/console.mjs';
 
 export const DIR = path.join(HOME, 'agent');
 const STATE = path.join(DIR, 'tabs.json');
@@ -332,6 +333,7 @@ async function sessionFor(tab) {
   // So the page behaves as if it's in front when its window is behind others.
   await browserCall('Emulation.setFocusEmulationEnabled', { enabled: true }, sessionId).catch(() => {});
   if (tab.recording) await browserCall('Network.enable', { maxPostDataSize: 65536 }, sessionId).catch(() => {});
+  if (tab.consoling) await consoleOn(sessionId).catch(() => {});
   const tree = await browserCall('Page.getFrameTree', {}, sessionId).catch(() => null);
   tab.mainFrame = tree?.frameTree?.frame?.id;
   await browserCall('Target.setAutoAttach', AUTO_ATTACH, sessionId).catch(() => {});
@@ -433,7 +435,14 @@ function onEvent(m) {
   if (method === 'Page.javascriptDialogClosed') post({ type: 'event', event: 'dialogClosed', tabId: tab.tabId });
   if (method.startsWith('WebMCP.')) post({ type: 'event', event: 'webmcp', tabId: tab.tabId, method, params });
   if (tab.recording && NET_EVENTS.has(method)) post({ type: 'event', event: 'net', tabId: tab.tabId, method, params });
+  if (tab.consoling && CONSOLE_EVENTS.has(method)) post({ type: 'event', event: 'console', tabId: tab.tabId, method, params });
 }
+
+// Console capture for `browserbear console`, as the extension does it.
+const consoleOn = async (sessionId) => {
+  await browserCall('Runtime.enable', {}, sessionId);
+  await browserCall('Log.enable', {}, sessionId);
+};
 
 // What `handoff --wait` asks: is there still a sign-in form, and is this text
 // here? Yes or no only, as with the extension. Main frame only, for now.
@@ -551,6 +560,18 @@ const ops = {
     const session = await sessionFor(tab);
     if (on) await browserCall('Network.enable', { maxPostDataSize: 65536 }, session);
     else await browserCall('Network.disable', {}, session).catch(() => {});
+    return true;
+  },
+
+  async console({ tabId, on }) {
+    const tab = tabOf(tabId);
+    tab.consoling = Boolean(on);
+    const session = await sessionFor(tab);
+    if (on) await consoleOn(session);
+    else {
+      await browserCall('Runtime.disable', {}, session).catch(() => {});
+      await browserCall('Log.disable', {}, session).catch(() => {});
+    }
     return true;
   },
 

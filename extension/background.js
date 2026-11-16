@@ -408,6 +408,22 @@ const ops = {
     return true;
   },
 
+  // Console capture for `browserbear console`: keeps the debugger on the tab and
+  // passes its console messages, uncaught errors and browser log (failed loads,
+  // say) to the service. A page can notice Runtime.enable, so it's only on while
+  // capturing.
+  async console({ tabId, on }) {
+    if (on) {
+      consoling.add(tabId);
+      await attach(tabId);
+      await consoleOn(tabId);
+    } else {
+      consoling.delete(tabId);
+      if (attached.has(tabId)) await consoleOff(tabId);
+    }
+    return true;
+  },
+
   // Annotate for a Threadbear thread (annotation.js): the overlay goes into
   // this extension's isolated world in the tab, never the page's own, and the
   // tab comes to the front so the user can mark it. Through scripting, not the
@@ -490,6 +506,16 @@ const COVERED = /^(Input\.|DOM\.getNodeForLocation$|Page\.captureScreenshot$)/;
 const showTimers = new Map();
 const casting = new Set(); // tabs streaming to Threadbear's Browser panel
 const recording = new Set(); // tabs whose network traffic goes to the service (har)
+const consoling = new Set(); // tabs whose console goes to the service
+const CONSOLE_EVENTS = new Set(['Runtime.consoleAPICalled', 'Runtime.exceptionThrown', 'Log.entryAdded']);
+const consoleOn = async (tabId) => {
+  await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
+  await chrome.debugger.sendCommand({ tabId }, 'Log.enable');
+};
+const consoleOff = async (tabId) => {
+  await chrome.debugger.sendCommand({ tabId }, 'Runtime.disable').catch(() => {});
+  await chrome.debugger.sendCommand({ tabId }, 'Log.disable').catch(() => {});
+};
 const NET_EVENTS = new Set(['Network.requestWillBeSent', 'Network.requestWillBeSentExtraInfo', 'Network.responseReceived', 'Network.responseReceivedExtraInfo', 'Network.loadingFinished', 'Network.loadingFailed']);
 
 // The service went away without stopping its casts (it crashed, or was
@@ -749,6 +775,7 @@ async function attach(tabId) {
       await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
       // Back after a detach (a handoff, say): keep recording.
       if (recording.has(tabId)) await chrome.debugger.sendCommand({ tabId }, 'Network.enable', { maxPostDataSize: 65536 });
+      if (consoling.has(tabId)) await consoleOn(tabId);
       await autoAttach(tabId);
     } catch (e) {
       // Already attached by us from before a worker restart is fine. The
@@ -761,7 +788,7 @@ async function attach(tabId) {
   clearTimeout(attached.get(tabId));
   // A cast of a page that isn't changing sends no frames, and so no acks:
   // that's not idle.
-  attached.set(tabId, setTimeout(() => (casting.has(tabId) || recording.has(tabId) ? attach(tabId) : detach(tabId)), IDLE_DETACH_MS));
+  attached.set(tabId, setTimeout(() => (casting.has(tabId) || recording.has(tabId) || consoling.has(tabId) ? attach(tabId) : detach(tabId)), IDLE_DETACH_MS));
 }
 
 // Points other extensions' frames in the tab at about:blank (and hides them),
@@ -834,6 +861,7 @@ chrome.debugger.onDetach.addListener(({ tabId }, reason) => {
   // You cancelled Chrome's debugging bar, or the tab closed: the recording
   // ends (the service marks the gap and keeps what it has).
   recording.delete(tabId);
+  consoling.delete(tabId);
   showMarkSoon(tabId);
   clearTimeout(attached.get(tabId));
   attached.delete(tabId);
@@ -857,6 +885,7 @@ chrome.debugger.onEvent.addListener(({ tabId, sessionId }, method, params) => {
   // The tools a page offers agents (WebMCP), and the answers to calling them.
   if (method.startsWith('WebMCP.')) post({ type: 'event', event: 'webmcp', tabId, method, params });
   if (recording.has(tabId) && NET_EVENTS.has(method)) post({ type: 'event', event: 'net', tabId, method, params });
+  if (consoling.has(tabId) && CONSOLE_EVENTS.has(method)) post({ type: 'event', event: 'console', tabId, method, params });
   // The Browser panel's picture. Chrome sends the next one once the service
   // acks this one, so a slow panel gets fewer frames, not a queue.
   if (method === 'Page.screencastFrame' && casting.has(tabId)) post({ type: 'event', event: 'frame', tabId, params: { data: params.data, sessionId: params.sessionId } });

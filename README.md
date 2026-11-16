@@ -49,6 +49,20 @@ browserbear CLI (or Threadbear)
   such a frame without one. Frames with nothing to act on are left out, and all of
   a snapshot's frames get 4 s between them. After opencode Browse's iframe snapshots.
 - Everything that changes a page answers with that diff, so there's no separate look.
+- BrowserBear's own looks at a page (has it loaded, has a click navigated, its text)
+  run in a world of their own, which shares the DOM but none of the page's globals,
+  so the page can't see the mark it leaves to spot a navigation. `eval` and WebMCP
+  still run in the page's world. After opencode Browse's Patchright-style isolated worlds.
+- `eval` given a function (`() => document.title`, the way `page.evaluate` takes
+  one) calls it, rather than handing back `{}`. After opencode Browse's #268.
+- `console <tab>` shows the page's console messages, uncaught errors and failed
+  loads. The first look turns capturing on (Runtime.enable, which a page can notice,
+  so it's only on while capturing) and includes what Chrome kept from before; each
+  look after shows what's new. Objects Chrome sends without a preview are asked for
+  as JSON. After opencode Browse's console tool.
+- With a site list, a tab with no page yet (a popup from a `target=_blank` link,
+  before its first page commits) isn't refused for being nowhere; where it lands is
+  checked as usual. After opencode Browse's #273.
 - The extension detaches from a tab 30 s after its last command, so Chrome's "started
   debugging this browser" bar doesn't hang around.
 - All the page logic is in the service; the extension rarely needs to change. The

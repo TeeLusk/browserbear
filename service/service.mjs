@@ -21,6 +21,7 @@ import { allowedFor, loginsFor, pickLogin, secretsFor } from './onepassword.mjs'
 import { tbPath, showBrowserPanel, run as runFile } from './threadbear.mjs';
 import { createAllow, matches, siteOf } from './allow.mjs';
 import { createRecorder, NET_EVENTS, MAX_BODY, MAX_BODIES } from './har.mjs';
+import { createConsole, CONSOLE_EVENTS, SHOW_OBJECT } from './console.mjs';
 
 fs.mkdirSync(LOGS, { recursive: true, mode: 0o700 });
 fs.mkdirSync(OUT, { recursive: true, mode: 0o700 });
@@ -67,6 +68,7 @@ let nextId = 1;
 // Sites agents may use (allow.mjs), and tabs recording network traffic (har.mjs).
 const allow = createAllow(path.join(HOME, 'allow.json'));
 const recordings = new Map(); // tabId -> recorder
+const consoles = new Map(); // tabId -> console capture (console.mjs)
 
 
 // Chrome's own list of profiles, so "Work" or "Profile 2" or the email
@@ -421,6 +423,7 @@ const USES = {
   tools: () => 'looking at the page',
   call: ({ name }) => `using the page's ${name} tool`,
   har: ({ action }) => (action === 'stop' ? 'saving its network traffic' : 'recording network traffic'),
+  console: () => 'reading its console',
 };
 
 // "Post" for e12 when the last snapshot had `e12 button "Post"`.
@@ -953,7 +956,7 @@ function onWebmcp(tabId, method, params) {
 // may be a new one (the extension lets go after 30 s idle), and the list from
 // the last one may be another page's. A page without the API skips all this.
 async function toolsNow(tabId, waitMs = 400) {
-  if ((await evaluate(tabId, 'Boolean(document.modelContext || navigator.modelContext)').catch(() => false)) !== true) return [];
+  if ((await evaluate(tabId, 'Boolean(document.modelContext || navigator.modelContext)', { page: true }).catch(() => false)) !== true) return [];
   pageTools.set(tabId, new Map());
   await cdp(tabId, 'WebMCP.disable').catch(() => {});
   try {
@@ -1524,7 +1527,7 @@ async function typeChecked(tabId, node, text) {
   // In a rich editor, only the text showing up counts, since a decoration it
   // redraws changes its innerText too.
   const unchanged = async () =>
-    before.rich ? times(after.value, text) <= times(before.value, text) && !(await fieldMutated(tabId, field)) : after.value === before.value && !before.noOp;
+    before.rich ? times(after.value, text) <= times(before.value, text) && !(await fieldMutated(tabId, before.watch)) : after.value === before.value && !before.noOp;
   const late = async () => {
     for (let waited = 0; waited < LATE_INPUT_MS && (await unchanged()); waited += 150) {
       await sleep(150);
@@ -1566,24 +1569,13 @@ const LATE_INPUT_MS = 1500;
 
 // What a field holds before typing, and starts watching a rich editor's DOM for
 // the text arriving. noOp: an input whose selection already holds exactly the text.
-const watchField = (tabId, field, text) =>
-  cdp(tabId, 'Runtime.callFunctionOn', {
+// watch: a handle on whether it has, held by the service rather than left on the
+// field, where the page could see it.
+const watchField = async (tabId, field, text) => {
+  const before = await cdp(tabId, 'Runtime.callFunctionOn', {
     objectId: field,
     functionDeclaration: `function (text) {
       const field = this;
-      if (field.isContentEditable) {
-        field.__browserbearMutated = false;
-        // Only a change that brings the text in counts, not a decoration redrawn.
-        const want = (s) => s.toLowerCase().replace(/[^\\p{L}\\p{N}]/gu, '') || s.replace(/\\s+/g, ' ').trim();
-        const brings = (n) => want(n.textContent || '').includes(want(text));
-        const seen = new MutationObserver((records) => {
-          if (!records.some((r) => (r.type === 'characterData' ? brings(r.target) : [...r.addedNodes].some(brings)))) return;
-          field.__browserbearMutated = true;
-          seen.disconnect();
-        });
-        seen.observe(field, { subtree: true, childList: true, characterData: true });
-        setTimeout(() => seen.disconnect(), 30000);
-      }
       // base: what's left once the selection goes, which is what one copy goes into.
       let noOp = false, base = field.value ?? field.innerText;
       try {
@@ -1602,9 +1594,29 @@ const watchField = (tabId, field, text) =>
     arguments: [{ value: text }],
     returnByValue: true,
   }).then((r) => r.result?.value ?? null);
+  if (before?.rich) before.watch = await cdp(tabId, 'Runtime.callFunctionOn', { objectId: field, functionDeclaration: WATCH_RICH, arguments: [{ value: text }] }).then((r) => r.result?.objectId || null, () => null);
+  return before;
+};
 
-const fieldMutated = (tabId, field) =>
-  cdp(tabId, 'Runtime.callFunctionOn', { objectId: field, functionDeclaration: 'function () { return this.__browserbearMutated === true; }', returnByValue: true }).then((r) => r.result?.value === true, () => false);
+// Only a change that brings the text in counts, not a decoration redrawn.
+const WATCH_RICH = `function (text) {
+  const state = { mutated: false };
+  const want = (s) => s.toLowerCase().replace(/[^\\p{L}\\p{N}]/gu, '') || s.replace(/\\s+/g, ' ').trim();
+  const brings = (n) => want(n.textContent || '').includes(want(text));
+  const seen = new MutationObserver((records) => {
+    if (!records.some((r) => (r.type === 'characterData' ? brings(r.target) : [...r.addedNodes].some(brings)))) return;
+    state.mutated = true;
+    seen.disconnect();
+  });
+  seen.observe(this, { subtree: true, childList: true, characterData: true });
+  setTimeout(() => seen.disconnect(), 30000);
+  return state;
+}`;
+
+const fieldMutated = (tabId, watch) =>
+  !watch
+    ? Promise.resolve(false)
+    : cdp(tabId, 'Runtime.callFunctionOn', { objectId: watch, functionDeclaration: 'function () { return this.mutated === true; }', returnByValue: true }).then((r) => r.result?.value === true, () => false);
 
 // Letters and digits, or for text with none (punctuation), the text itself.
 const norm = (text) => (bare(text) ? bare : flatten);
@@ -1692,8 +1704,32 @@ async function replaceText(tabId, node, text) {
   throw new Error(`--replace didn't work on tab ${tabId}: the field holds ${shown(read)}, not ${JSON.stringify(text)}. Nothing was submitted. The page may have changed or reformatted it; snap to see`);
 }
 
-async function evaluate(tabId, expression) {
-  const r = await cdp(tabId, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+const FUNCTION_LITERAL = /^\s*(async\s+)?(function\b|\([^()]*\)\s*=>|[\w$]+\s*=>)/;
+
+// BrowserBear's own looks at a page (has it loaded, has it navigated, its text)
+// run in a world of their own: the same DOM, but none of the page's globals, so
+// the page can't see the mark it leaves (or fake document.readyState). eval and
+// WebMCP, which need what the page itself has made, run in the page's world.
+// After opencode Browse's Patchright-style isolated worlds.
+const WORLD = 'browserbear';
+
+async function hiddenWorld(tabId) {
+  const s = state(tabId);
+  // The main frame's id stays the same across navigations.
+  s.mainFrame ||= (await cdp(tabId, 'Page.getFrameTree', {})).frameTree?.frame?.id;
+  if (!s.mainFrame) return undefined;
+  try {
+    // The same name gets the same world, with a fresh one for each new document.
+    return (await cdp(tabId, 'Page.createIsolatedWorld', { frameId: s.mainFrame, worldName: WORLD })).executionContextId;
+  } catch (e) {
+    s.mainFrame = null;
+    throw e;
+  }
+}
+
+async function evaluate(tabId, expression, { page = false } = {}) {
+  const contextId = page ? undefined : await hiddenWorld(tabId);
+  const r = await cdp(tabId, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, ...(contextId ? { contextId } : {}) });
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
   return r.result.value;
 }
@@ -2306,7 +2342,16 @@ const commands = {
   // No wake here: its look first would hide a stuck session from the eval.
   // goto, snap and read have already woken the page, and it stays awake for
   // as long as the session does.
-  eval: ({ tab, js }) => evaluate(tab, js),
+  // A function, the way page.evaluate takes one ("() => document.title"), is
+  // called rather than handed back as {}. After opencode Browse's #268.
+  async eval({ tab, js }) {
+    if (!FUNCTION_LITERAL.test(js)) return evaluate(tab, js, { page: true });
+    return evaluate(tab, `(${js})()`, { page: true }).catch((e) => {
+      // "() => 1; more" isn't one function: run it as it was given.
+      if (/^SyntaxError/.test(e.message)) return evaluate(tab, js, { page: true });
+      throw e;
+    });
+  },
 
   // Raw CDP, for debugging BrowserBear itself and for anything it doesn't wrap yet.
   async cdp({ tab, method, params }) {
@@ -2565,6 +2610,38 @@ const commands = {
     throw new Error('allow [list] | add <site...> | remove <site...> | clear, with --thread <id> for one thread');
   },
 
+  // A tab's console (console.mjs): the first look starts capturing, with what
+  // Chrome kept from before; each look after prints what's new.
+  async console({ tab, action, all, errors }) {
+    const p = await ownerOf(tab);
+    const have = consoles.get(tab);
+    if (action === 'stop') {
+      if (!have) return `tab ${tab}'s console isn't being captured`;
+      consoles.delete(tab);
+      await call(p, 'console', { tabId: tab, on: false }, 5_000).catch(() => {});
+      return `stopped capturing tab ${tab}'s console`;
+    }
+    if (action) throw new Error('console <tab> [--all] [--errors] | console <tab> stop');
+    // A detach (the debugging bar cancelled, a handoff) turned it off: on again,
+    // keeping what was captured.
+    if (!have || have.off) {
+      if (!have) consoles.set(tab, createConsole({ tabId: tab }));
+      try {
+        await call(p, 'console', { tabId: tab, on: true });
+        consoles.get(tab).off = false;
+      } catch (e) {
+        if (!have) consoles.delete(tab);
+        if (/unknown op/.test(e.message)) throw new Error(`${describe(p)} has an older BrowserBear extension, which can't capture the console; browserbear reload, then try again`);
+        throw e;
+      }
+      await settle(); // what Chrome kept from before arrives as events
+    }
+    const out = consoles.get(tab).take({ all, errors });
+    if (have) return out;
+    const bar = p.instance === AGENT_INSTANCE ? '' : ' Chrome\'s "started debugging" bar stays up while it does';
+    return `${out}\n(capturing tab ${tab}'s console from now on: browserbear console ${tab} shows what's new, console ${tab} stop ends it. The page can tell it's being watched while this is on.${bar})`;
+  },
+
   // Records a tab's network traffic to a HAR file (har.mjs).
   async har({ tab, action = 'start', file, bodies, raw }) {
     if (action === 'start') {
@@ -2642,6 +2719,16 @@ function onHostMessage(profile, msg) {
       if (NET_EVENTS.has(msg.method)) recordings.get(msg.tabId)?.on(msg.method, msg.params);
       return;
     }
+    if (msg.event === 'console') {
+      const entry = CONSOLE_EVENTS.has(msg.method) ? consoles.get(msg.tabId)?.on(msg.method, msg.params) : null;
+      for (const o of entry?.objects || []) {
+        cdp(msg.tabId, 'Runtime.callFunctionOn', { objectId: o.objectId, functionDeclaration: SHOW_OBJECT, returnByValue: true }, PROBE_MS).then(
+          (r) => typeof r.result?.value === 'string' && (entry.parts[o.i] = r.result.value),
+          () => {},
+        );
+      }
+      return;
+    }
     if (msg.event === 'detached' && msg.reason !== 'target_closed') recordings.get(msg.tabId)?.gap();
     if (msg.event === 'dialog') {
       state(msg.tabId).dialog = msg.params;
@@ -2656,6 +2743,10 @@ function onHostMessage(profile, msg) {
     }
     if (msg.event === 'dialogClosed') state(msg.tabId).dialog = null; // you answered it yourself
     if (msg.event === 'detached') log('detached', msg.tabId, msg.reason);
+    if (msg.event === 'detached' && consoles.has(msg.tabId)) {
+      if (msg.reason === 'target_closed') consoles.delete(msg.tabId);
+      else consoles.get(msg.tabId).off = true;
+    }
     if (msg.event === 'detached') state(msg.tabId).dialog = null;
     if (msg.event === 'detached') pageToolsGone(msg.tabId);
     // The buttons on the pill in an agent's tab.

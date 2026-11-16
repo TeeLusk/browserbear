@@ -3,47 +3,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { spawn } from 'node:child_process';
-import { CHROME, startBear } from './harness.mjs';
+import { CHROME, chromeWithEvents, startBear } from './harness.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// headlessChrome() in the harness drops CDP events; this keeps them.
-async function chromeWithEvents(t, onEvent) {
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'browserbear-chrome-'));
-  const chrome = spawn(CHROME, ['--headless', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', 'about:blank'], { stdio: 'ignore' });
-  t.after(async () => {
-    const gone = new Promise((r) => chrome.once('exit', r));
-    chrome.kill();
-    await gone;
-    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5 });
-  });
-  const portFile = path.join(profile, 'DevToolsActivePort');
-  const read = () => (fs.existsSync(portFile) ? fs.readFileSync(portFile, 'utf8').split('\n') : []);
-  for (let i = 0; i < 100 && !read()[1]; i++) await sleep(100);
-  const [port, wsPath] = read();
-  const ws = new WebSocket(`ws://127.0.0.1:${port}${wsPath}`);
-  await new Promise((resolve, reject) => ((ws.onopen = resolve), (ws.onerror = reject)));
-  t.after(() => ws.close());
-  let next = 1;
-  const waiting = new Map();
-  ws.onmessage = ({ data }) => {
-    const msg = JSON.parse(data);
-    if (!msg.id) return onEvent(msg);
-    const w = waiting.get(msg.id);
-    waiting.delete(msg.id);
-    msg.error ? w?.reject(new Error(msg.error.message)) : w?.resolve(msg.result);
-  };
-  return (method, params = {}, sessionId) =>
-    new Promise((resolve, reject) => {
-      const id = next++;
-      waiting.set(id, { resolve, reject });
-      ws.send(JSON.stringify({ id, method, params, sessionId }));
-    });
-}
 
 const PAGE = `<!doctype html><title>Shop</title><img src="/missing.png"><img src="http://no-such-host.invalid/x.png">
 <script>fetch('/api', { method: 'POST', body: JSON.stringify({ item: 1 }) }).then(() => { document.title = 'Done'; });</script>`;

@@ -26,7 +26,7 @@ const USAGE = `browserbear: let agents use your real Chrome profiles
   browserbear goto <tab> <url>
   browserbear read <tab>                        the page's text
   browserbear shot <tab> [file]                 screenshot, prints the PNG path
-  browserbear eval <tab> <js>
+  browserbear eval <tab> <js>                   an expression, or a function ("() => document.title"), which is called
   browserbear upload <tab> <ref|selector> <file...>
                                                 the file input, or the button or label that opens one
                                                 ("Choose files"); snap lists hidden inputs as file-input
@@ -58,6 +58,10 @@ const USAGE = `browserbear: let agents use your real Chrome profiles
                                                 requests). Cookies and auth headers are blanked unless --raw;
                                                 --bodies adds response bodies (and request bodies)
   browserbear har <tab> status
+  browserbear console <tab> [--errors] [--all]  the page's console messages, uncaught errors and failed loads. The first
+                                                look starts capturing (with what Chrome kept from before); each look
+                                                after shows what's new. --errors: errors and warnings only
+  browserbear console <tab> stop
   browserbear allow                             the sites agents may use (for this thread, and for every thread).
                                                 With no list, any site. open, goto and claim refuse other sites,
                                                 commands refuse a tab that's on one, and a click that leads to one
@@ -153,6 +157,8 @@ function argsFor(cmd, pos, flags) {
       return { tab: a, action: b, text: rest.join(' ') || undefined };
     case 'allow':
       return { action: a || 'list', sites: [b, ...rest].filter(Boolean), forThread: typeof flags.thread === 'string' ? flags.thread : undefined };
+    case 'console':
+      return { tab: a, action: b, all: !!flags.all, errors: !!flags.errors };
     case 'har':
       // The service runs in its own folder, so a file name is resolved here.
       return { tab: a, action: b || 'start', file: rest[0] && path.resolve(rest[0]), bodies: !!flags.bodies, raw: !!flags.raw };

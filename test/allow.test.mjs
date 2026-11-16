@@ -7,7 +7,9 @@ import path from 'node:path';
 import net from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { matches, normalise } from '../service/allow.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import { createAllow, matches, normalise } from '../service/allow.mjs';
 import { root, startBear } from './harness.mjs';
 
 const run = promisify(execFile);
@@ -28,6 +30,19 @@ test('site patterns', () => {
   assert.equal(normalise('https://Example.com:8080/path'), 'example.com:8080');
   assert.equal(normalise('[::1]'), '::1');
   assert.equal(normalise('not a site!'), null);
+});
+
+// A popup from a target=_blank link has no URL until its first page commits; it
+// isn't refused for that (opencode Browse #273), and what it lands on still is.
+test('a tab with no page yet is not off the list', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bb-allow-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const allow = createAllow(path.join(dir, 'allow.json'));
+  allow.add(['example.com']);
+  assert.equal(allow.check('', undefined), null);
+  assert.equal(allow.check('about:blank', undefined), null);
+  assert.equal(allow.check('https://example.com/x', undefined), null);
+  assert.deepEqual(allow.check('https://evil.test/', undefined), ['example.com']);
 });
 
 test('agents keep to the allowed sites', async (t) => {
